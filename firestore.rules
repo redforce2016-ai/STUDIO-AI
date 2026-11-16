@@ -1,0 +1,270 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() {
+      return request.resource.data;
+    }
+    function existing() {
+      return resource.data;
+    }
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    function isValidOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // Validation Blueprints
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'displayName', 'photoUrl', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && isValidOptionalString(data, 'photoUrl', 500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateInfo(data, userId) {
+      return data.keys().hasAll(['userId', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'email', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProject(data, projectId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'threadId', 'title', 'idea', 'platform',
+          'tone', 'targetDurationSeconds', 'currentStage', 'checkpointStatus',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'threadId', 'title', 'idea', 'platform',
+          'tone', 'targetDurationSeconds', 'currentStage', 'checkpointStatus',
+          'videoTitle', 'researchSummary', 'scriptHook', 'scriptBody',
+          'scriptCta', 'narrationText', 'shotsCount', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id == projectId
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.threadId is string && data.threadId.size() >= 1 && data.threadId.size() <= 160
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.idea is string && data.idea.size() >= 1 && data.idea.size() <= 5000
+        && data.platform in ['instagram', 'youtube', 'tiktok', 'reels', 'shorts']
+        && data.tone in ['educational', 'cinematic_story', 'news_analysis', 'fast_motivational']
+        && data.targetDurationSeconds is int && data.targetDurationSeconds >= 10 && data.targetDurationSeconds <= 1800
+        && data.currentStage in ['input', 'research_script', 'voiceover', 'director', 'visuals', 'completed']
+        && data.checkpointStatus in ['idle', 'running', 'waiting_approval', 'approved', 'error']
+        && isValidOptionalString(data, 'videoTitle', 250)
+        && isValidOptionalString(data, 'researchSummary', 10000)
+        && isValidOptionalString(data, 'scriptHook', 2000)
+        && isValidOptionalString(data, 'scriptBody', 15000)
+        && isValidOptionalString(data, 'scriptCta', 2000)
+        && isValidOptionalString(data, 'narrationText', 15000)
+        && (!('shotsCount' in data) || (data.shotsCount is int && data.shotsCount >= 0 && data.shotsCount <= 30))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidShot(data, projectId, shotId) {
+      return data.keys().hasAll([
+          'id', 'projectId', 'ownerId', 'shotNumber', 'timecode',
+          'durationSeconds', 'cameraAngle', 'cameraMovement',
+          'sceneDescriptionFa', 'visualPromptFa', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'projectId', 'ownerId', 'shotNumber', 'timecode',
+          'durationSeconds', 'cameraAngle', 'cameraMovement',
+          'sceneDescriptionFa', 'spokenSegment', 'onScreenText',
+          'lightingAndMood', 'visualPromptFa', 'imageUrl', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id == shotId
+        && isValidId(data.projectId)
+        && data.projectId == projectId
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.shotNumber is int && data.shotNumber >= 1 && data.shotNumber <= 30
+        && data.timecode is string && data.timecode.size() >= 1 && data.timecode.size() <= 32
+        && data.durationSeconds is int && data.durationSeconds >= 1 && data.durationSeconds <= 120
+        && data.cameraAngle is string && data.cameraAngle.size() >= 1 && data.cameraAngle.size() <= 200
+        && data.cameraMovement is string && data.cameraMovement.size() >= 1 && data.cameraMovement.size() <= 200
+        && data.sceneDescriptionFa is string && data.sceneDescriptionFa.size() >= 1 && data.sceneDescriptionFa.size() <= 2000
+        && isValidOptionalString(data, 'spokenSegment', 2000)
+        && isValidOptionalString(data, 'onScreenText', 200)
+        && isValidOptionalString(data, 'lightingAndMood', 500)
+        && data.visualPromptFa is string && data.visualPromptFa.size() >= 1 && data.visualPromptFa.size() <= 2000
+        && isValidOptionalString(data, 'imageUrl', 500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMediaAsset(data, assetId) {
+      return data.keys().hasAll(['id', 'ownerId', 'kind', 'title', 'modelUsed', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'kind', 'title', 'prompt', 'mediaUrl',
+          'aspectRatio', 'modelUsed', 'transcriptText', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id == assetId
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.kind in ['image', 'video', 'transcript', 'scene3d']
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && isValidOptionalString(data, 'prompt', 3000)
+        && isValidOptionalString(data, 'mediaUrl', 500)
+        && isValidOptionalString(data, 'aspectRatio', 20)
+        && data.modelUsed is string && data.modelUsed.size() >= 1 && data.modelUsed.size() <= 80
+        && isValidOptionalString(data, 'transcriptText', 20000)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Users Split Collections (PII Isolation)
+    match /users/{userId}/public/profile {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'updatedAt']);
+      allow delete: if isVerified() && isValidId(userId) && isOwner(userId);
+    }
+
+    match /users/{userId}/private/info {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow create: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidPrivateInfo(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidPrivateInfo(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+      allow delete: if isVerified() && isValidId(userId) && isOwner(userId);
+    }
+
+    // Studio Projects
+    match /projects/{projectId} {
+      allow get: if isSignedIn() && isValidId(projectId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(projectId)
+        && isValidProject(incoming(), projectId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(projectId)
+        && existing().ownerId == request.auth.uid
+        && existing().currentStage != 'completed'
+        && isValidProject(incoming(), projectId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().threadId == existing().threadId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Edit brief or metadata
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'idea', 'platform', 'tone', 'targetDurationSeconds', 'updatedAt']) ||
+          // Action: Advance or update LangGraph pipeline outputs
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'currentStage', 'checkpointStatus', 'videoTitle', 'researchSummary',
+            'scriptHook', 'scriptBody', 'scriptCta', 'narrationText', 'shotsCount', 'updatedAt'
+          ])
+        );
+      allow delete: if isVerified() && isValidId(projectId) && existing().ownerId == request.auth.uid;
+
+      // Subcollection: Project Shots (Master Gate checks parent project ownership)
+      match /shots/{shotId} {
+        allow get: if isSignedIn() && isValidId(projectId) && isValidId(shotId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+        allow create: if isVerified()
+          && isValidId(projectId)
+          && isValidId(shotId)
+          && isValidShot(incoming(), projectId, shotId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/projects/$(projectId))
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.currentStage != 'completed';
+        allow update: if isVerified()
+          && isValidId(projectId)
+          && isValidId(shotId)
+          && existing().ownerId == request.auth.uid
+          && isValidShot(incoming(), projectId, shotId)
+          && incoming().id == existing().id
+          && incoming().projectId == existing().projectId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid
+          && get(/databases/$(database)/documents/projects/$(projectId)).data.currentStage != 'completed'
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'shotNumber', 'timecode', 'durationSeconds', 'cameraAngle', 'cameraMovement',
+            'sceneDescriptionFa', 'spokenSegment', 'onScreenText', 'lightingAndMood',
+            'visualPromptFa', 'imageUrl', 'updatedAt'
+          ]);
+        allow delete: if isVerified() && isValidId(projectId) && isValidId(shotId) && existing().ownerId == request.auth.uid;
+      }
+    }
+
+    // Studio Media Library (Images, Videos, Transcripts, 3D Scene Presets)
+    match /mediaLibrary/{assetId} {
+      allow get: if isSignedIn() && isValidId(assetId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified()
+        && isValidId(assetId)
+        && isValidMediaAsset(incoming(), assetId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified()
+        && isValidId(assetId)
+        && existing().ownerId == request.auth.uid
+        && isValidMediaAsset(incoming(), assetId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().kind == existing().kind
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'prompt', 'mediaUrl', 'aspectRatio', 'transcriptText', 'updatedAt']);
+      allow delete: if isVerified() && isValidId(assetId) && existing().ownerId == request.auth.uid;
+    }
+  }
+}

@@ -1,0 +1,362 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Non-sensitive public profile for a studio creator",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "photoUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "displayName", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Isolated private PII record for a studio creator",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "email", "createdAt", "updatedAt"]
+    },
+    "StudioProject": {
+      "title": "StudioProject",
+      "description": "Content Studio production pipeline project metadata and script summary",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "idea": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 5000
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["instagram", "youtube", "tiktok", "reels", "shorts"]
+        },
+        "tone": {
+          "type": "string",
+          "enum": ["educational", "cinematic_story", "news_analysis", "fast_motivational"]
+        },
+        "targetDurationSeconds": {
+          "type": "integer"
+        },
+        "currentStage": {
+          "type": "string",
+          "enum": ["input", "research_script", "voiceover", "director", "visuals", "completed"]
+        },
+        "checkpointStatus": {
+          "type": "string",
+          "enum": ["idle", "running", "waiting_approval", "approved", "error"]
+        },
+        "videoTitle": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 250
+        },
+        "researchSummary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 10000
+        },
+        "scriptHook": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "scriptBody": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 15000
+        },
+        "scriptCta": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "narrationText": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 15000
+        },
+        "shotsCount": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "threadId",
+        "title",
+        "idea",
+        "platform",
+        "tone",
+        "targetDurationSeconds",
+        "currentStage",
+        "checkpointStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectShot": {
+      "title": "ProjectShot",
+      "description": "Director decoupage shot belonging to a StudioProject",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "shotNumber": {
+          "type": "integer"
+        },
+        "timecode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "durationSeconds": {
+          "type": "integer"
+        },
+        "cameraAngle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "cameraMovement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sceneDescriptionFa": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "spokenSegment": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000
+        },
+        "onScreenText": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200
+        },
+        "lightingAndMood": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "visualPromptFa": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "ownerId",
+        "shotNumber",
+        "timecode",
+        "durationSeconds",
+        "cameraAngle",
+        "cameraMovement",
+        "sceneDescriptionFa",
+        "visualPromptFa",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Metadata for generated studio images, videos, transcriptions, and 3D presets",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["image", "video", "transcript", "scene3d"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "mediaUrl": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "aspectRatio": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 20
+        },
+        "modelUsed": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "transcriptText": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 20000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "kind",
+        "title",
+        "modelUsed",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/public/profile": {
+      "schema": { "$ref": "#/entities/UserPublicProfile" },
+      "description": "Public profile document for a studio user"
+    },
+    "/users/{userId}/private/info": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Private PII document (email) isolated to the owning user"
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/StudioProject" },
+      "description": "User-owned Content Studio pipeline projects"
+    },
+    "/projects/{projectId}/shots/{shotId}": {
+      "schema": { "$ref": "#/entities/ProjectShot" },
+      "description": "Director decoupage shots linked to parent StudioProject"
+    },
+    "/mediaLibrary/{assetId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "User-owned generated images, videos, transcripts, and 3D studio presets"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Content Studio Desktop",
+  "description": "استودیو هوشمند تولید محتوای ویدیویی کوتاه با پایپ‌لاین چندعاملی LangGraph، گره ادغام‌شده پژوهشگر و سناریونویس، ایستگاه‌های تایید انسانی و بسته دسکتاپ ویندوز Tauri و Python.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
