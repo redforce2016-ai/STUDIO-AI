@@ -24,13 +24,16 @@ import {
   planShotsForProduction,
 } from "./agents.js";
 import { getRunOutputDir, getVideoConfig, resolveDimensions } from "./config.js";
+import { detectHardwareSync } from "./hardware.js";
 import { BlenderUnavailableError, isBlenderInstalled, renderBlenderShot } from "./providers/blender.js";
+import { ComfyUIProvider } from "./providers/comfyui.js";
 import {
   assembleFinalVideo,
   extractFrames,
   runDeterministicChecks,
 } from "./providers/ffmpeg.js";
-import { GeminiOmniVideoProvider } from "./providers/generative.js";
+import { buildIndustrialPipeKeyframeSvg } from "./providers/generative.js";
+import { ParallaxVideoProvider } from "./providers/parallax.js";
 import { renderRemotionShot } from "./providers/remotion.js";
 import { validateCompositionPlanSafety } from "./schemas.js";
 
@@ -186,7 +189,7 @@ async function rendererNode(state: ShotWorkerState) {
     state.runId,
     spec.shot_id,
     { status: "rendering" },
-    createLog("renderer", "info", `رندر شات ${spec.shot_id} با ابزار ${spec.tool}`, {
+    createLog("renderer", "info", `رندر محلی شات ${spec.shot_id} با ابزار ${spec.tool}`, {
       shot_id: spec.shot_id,
       attempt: state.attempt,
     })
@@ -196,8 +199,14 @@ async function rendererNode(state: ShotWorkerState) {
   let fallbackUsed = Boolean(spec.fallback_used);
   let fallbackReason: string | null = spec.fallback_reason || null;
   let cacheHit = false;
+  let renderDurationMs = 0;
+  let vramUsedMb = 0;
+  let ramUsedMb = 0;
+  let subClipsCount = 1;
+  let depthMapUrl: string | null = null;
 
   let renderError: string | null = null;
+  const renderStarted = Date.now();
 
   try {
     if (spec.tool === "blender") {
@@ -213,7 +222,6 @@ async function rendererNode(state: ShotWorkerState) {
           timeoutMs: cfg.shotRenderTimeoutMs,
         });
       } catch (err) {
-        // Fallback 1x to Remotion when Blender unavailable or fails
         toolUsed = "remotion";
         fallbackUsed = true;
         fallbackReason =
@@ -228,30 +236,54 @@ async function rendererNode(state: ShotWorkerState) {
         });
         cacheHit = remRes.cacheHit;
       }
-    } else if (spec.tool === "generative_api") {
-      try {
-        const provider = new GeminiOmniVideoProvider();
-        await provider.generateClip({
-          shotId: spec.shot_id,
-          prompt: spec.visual.generative_prompt || spec.intent,
-          aspectRatio: state.aspectRatio,
-          durationSec: spec.duration_sec,
-          resolution: state.qualityMode === "final_1080p" ? "1080p" : "720p",
-          outputPath: outMp4,
-          timeoutMs: 180_000,
-        });
-      } catch (err) {
-        // Fallback 1x to Remotion on timeout/billing/quota error
-        toolUsed = "remotion";
-        fallbackUsed = true;
-        fallbackReason = `فال‌بک به Remotion از Gemini Omni: ${err instanceof Error ? err.message : String(err)}`;
-        const remRes = await renderRemotionShot({
-          plan,
-          outputPath: outMp4,
-          timeoutMs: cfg.shotRenderTimeoutMs,
-          bypassCache: state.bypassCache || state.attempt > 1,
-        });
-        cacheHit = remRes.cacheHit;
+      renderDurationMs = Date.now() - renderStarted;
+    } else if (
+      spec.tool === "comfyui" ||
+      spec.tool === "parallax" ||
+      spec.tool === "generative_api"
+    ) {
+      // Ensure local keyframe exists (Strictly Image-to-Video; Text-to-Video is forbidden)
+      let keyframePath = spec.visual.keyframe_path?.trim() || "";
+      if (!keyframePath || !fs.existsSync(keyframePath)) {
+        const autoKeyframeSvgPath = path.join(shotDir, `${spec.shot_id}_keyframe.svg`);
+        fs.writeFileSync(autoKeyframeSvgPath, buildIndustrialPipeKeyframeSvg(spec), "utf-8");
+        keyframePath = autoKeyframeSvgPath;
+      }
+
+      // If QA rejected 2 prior generative attempts, force Parallax on attempt 3
+      const forceParallaxByQa = state.attempt >= 3 || spec.tool === "parallax";
+      const provider = forceParallaxByQa
+        ? new ParallaxVideoProvider()
+        : new ComfyUIProvider({ autoFallbackToParallax: true });
+
+      const clipRes = await provider.generateClip({
+        shotId: spec.shot_id,
+        keyframePath,
+        prompt: spec.visual.generative_prompt || spec.intent,
+        cameraMotion: spec.visual.camera_motion,
+        aspectRatio: state.aspectRatio,
+        durationSec: spec.duration_sec,
+        qualityMode: state.qualityMode,
+        resolution: state.qualityMode === "final_1080p" ? "1080p" : "480p",
+        width: spec.resolution[0],
+        height: spec.resolution[1],
+        fps: spec.fps,
+        visualCriticApprovedPreview: state.attempt > 1,
+        outputPath: outMp4,
+        timeoutMs: cfg.shotRenderTimeoutMs,
+      });
+
+      toolUsed = clipRes.providerUsed;
+      fallbackUsed = fallbackUsed || clipRes.fallbackUsed || forceParallaxByQa;
+      fallbackReason = clipRes.fallbackReason || fallbackReason;
+      renderDurationMs = clipRes.totalDurationMs;
+      vramUsedMb = clipRes.vramUsedMb;
+      ramUsedMb = clipRes.ramUsedMb;
+      subClipsCount = clipRes.subClipsCount;
+      if (clipRes.depthMapPath && fs.existsSync(clipRes.depthMapPath)) {
+        depthMapUrl = `/api/media/video-runs/${state.runId}/shots/${spec.shot_id}/${path.basename(
+          clipRes.depthMapPath
+        )}`;
       }
     } else {
       const remRes = await renderRemotionShot({
@@ -261,9 +293,11 @@ async function rendererNode(state: ShotWorkerState) {
         bypassCache: state.bypassCache || state.attempt > 1,
       });
       cacheHit = remRes.cacheHit;
+      renderDurationMs = Date.now() - renderStarted;
     }
   } catch (err) {
     renderError = err instanceof Error ? err.message : String(err);
+    renderDurationMs = Date.now() - renderStarted;
     appendRunLog(
       state.runId,
       createLog("renderer", "error", `خطا در رندر شات ${spec.shot_id}: ${renderError}`, {
@@ -280,6 +314,11 @@ async function rendererNode(state: ShotWorkerState) {
   updateShotInRun(state.runId, spec.shot_id, {
     renderPath: renderOk ? outMp4 : null,
     renderUrl,
+    depthMapUrl,
+    renderDurationMs,
+    vramUsedMb,
+    ramUsedMb,
+    subClipsCount,
     toolUsed,
     fallbackUsed,
     fallbackReason: renderError ? `${fallbackReason ? fallbackReason + " | " : ""}${renderError}` : fallbackReason,
@@ -633,7 +672,7 @@ async function shotPlannerNode(state: VideoPipelineState) {
 async function toolRouterNode(state: VideoPipelineState) {
   const cfg = getVideoConfig();
   const blenderOk = cfg.enableBlender && isBlenderInstalled();
-  let generativeUsed = 0;
+  const hw = detectHardwareSync();
 
   const routed = state.shots.map((shot) => {
     let tool = shot.tool;
@@ -645,15 +684,13 @@ async function toolRouterNode(state: VideoPipelineState) {
       fallbackUsed = true;
       fallbackReason = "باینری Blender روی سرور نصب نیست؛ هدایت خودکار شات به Remotion.";
     } else if (tool === "generative_api") {
-      if (!cfg.enableGenerativeApi || generativeUsed >= cfg.maxGenerativeShotsPerRun) {
-        tool = "remotion";
-        fallbackUsed = true;
-        fallbackReason = !cfg.enableGenerativeApi
-          ? "مدل ویدیوی مولد Omni غیرفعال است؛ اجرا با Remotion."
-          : "سقف شات‌های مولد پر شده است؛ اجرا با Remotion.";
-      } else {
-        generativeUsed++;
-      }
+      // Cloud video API is strictly replaced with free local keyframe animation (ComfyUI / Parallax)
+      tool = hw.defaultProvider;
+      fallbackUsed = hw.defaultProvider === "parallax";
+      fallbackReason =
+        hw.defaultProvider === "parallax"
+          ? hw.profileReasonFa
+          : `هدایت به موتور محلی ComfyUI (${hw.selectedProfile})`;
     }
 
     return {

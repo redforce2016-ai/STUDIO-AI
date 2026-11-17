@@ -6,6 +6,7 @@ import type {
   VideoPreflightStatus,
   VideoQualityMode,
 } from "../../src/types/videoPipeline.js";
+import { detectHardwareSync } from "./hardware.js";
 
 export interface VideoPipelineConfig {
   defaultAspectRatio: VideoAspectFormat;
@@ -32,8 +33,8 @@ export const DEFAULT_VIDEO_CONFIG: VideoPipelineConfig = {
   maxShotRetries: 3,
   shotRenderTimeoutMs: 120_000,
   maxParallelShots: 3,
-  enableGenerativeApi: false,
-  maxGenerativeShotsPerRun: 1,
+  enableGenerativeApi: true,
+  maxGenerativeShotsPerRun: 4,
   enableBlender: true,
   targetLufs: -14,
   burnSubtitles: false,
@@ -124,6 +125,7 @@ export function runPreflightCheck(): VideoPreflightStatus {
   const localFontsAvailable = fs.existsSync(fontFile);
 
   const geminiKeyConfigured = Boolean(process.env.GEMINI_API_KEY?.trim());
+  const hw = detectHardwareSync();
 
   const missingCritical: string[] = [];
   if (!ffmpegAvailable) missingCritical.push("ffmpeg نصب نیست");
@@ -138,8 +140,10 @@ export function runPreflightCheck(): VideoPreflightStatus {
   if (!chromiumAvailable) {
     warnings.push("مرورگر Headless Chromium در اولین رندر توسط Remotion آماده می‌شود.");
   }
-  if (!geminiKeyConfigured) {
-    warnings.push("کلید GEMINI_API_KEY تنظیم نشده است؛ ارزیابی Vision QA نیازمند کلید معتبر است.");
+  if (hw.selectedProfile === "parallax_only") {
+    warnings.push(
+      `کارت گرافیک مجزا شناسایی نشد (RAM: ${hw.ramTotalGb}GB)؛ متحرک‌سازی Keyframe با حالت Parallax محلی اجرا می‌شود.`
+    );
   }
 
   return {
@@ -153,6 +157,13 @@ export function runPreflightCheck(): VideoPreflightStatus {
     blenderAvailable,
     localFontsAvailable,
     geminiKeyConfigured,
+    gpuModel: hw.gpuModel,
+    vramTotalGb: hw.vramTotalGb,
+    ramTotalGb: hw.ramTotalGb,
+    hardwareProfile: hw.selectedProfile,
+    defaultKeyframeProvider: hw.defaultProvider,
+    comfyuiAvailable: hw.selectedProfile !== "parallax_only",
+    parallaxAvailable: ffmpegAvailable,
     missingCritical,
     warnings,
   };

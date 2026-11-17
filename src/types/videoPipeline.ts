@@ -1,6 +1,6 @@
 export type VideoAspectFormat = "9:16" | "16:9";
 export type VideoQualityMode = "preview_480p" | "final_1080p";
-export type ShotToolKind = "remotion" | "blender" | "generative_api";
+export type ShotToolKind = "remotion" | "blender" | "comfyui" | "parallax" | "generative_api";
 export type CameraMotionKind = "static" | "push-in" | "pan" | "orbit";
 export type TransitionKind = "cut" | "crossfade" | "slide" | "zoom" | "wipe";
 export type PalettePresetKind =
@@ -86,6 +86,7 @@ export interface ShotSpec {
     animation_notes: string;
     blender_prompt?: string;
     generative_prompt?: string;
+    keyframe_path?: string;
   };
   style: {
     palette: [string, string, string];
@@ -213,6 +214,11 @@ export interface ShotExecutionRecord {
   cacheHit: boolean;
   renderPath?: string | null;
   renderUrl?: string | null;
+  depthMapUrl?: string | null;
+  renderDurationMs?: number;
+  vramUsedMb?: number;
+  ramUsedMb?: number;
+  subClipsCount?: number;
   frameUrls: string[];
   deterministicCheck?: DeterministicVideoCheck | null;
   criticReport?: VisualCriticReport | null;
@@ -289,6 +295,13 @@ export interface VideoPreflightStatus {
   blenderAvailable: boolean;
   localFontsAvailable: boolean;
   geminiKeyConfigured: boolean;
+  gpuModel?: string;
+  vramTotalGb?: number;
+  ramTotalGb?: number;
+  hardwareProfile?: string;
+  defaultKeyframeProvider?: "comfyui" | "parallax";
+  comfyuiAvailable?: boolean;
+  parallaxAvailable?: boolean;
   missingCritical: string[];
   warnings: string[];
 }

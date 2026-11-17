@@ -134,9 +134,17 @@ export const ShotSpecSchema = z.object({
   narration_text: z.string().default(""),
   tool: z.preprocess((v) => {
     const s = String(v || "remotion").toLowerCase().trim();
-    if (s === "blender" || s === "generative_api" || s === "remotion") return s;
+    if (
+      s === "blender" ||
+      s === "comfyui" ||
+      s === "parallax" ||
+      s === "generative_api" ||
+      s === "remotion"
+    ) {
+      return s;
+    }
     return "remotion";
-  }, z.enum(["remotion", "blender", "generative_api"])).default("remotion"),
+  }, z.enum(["remotion", "blender", "comfyui", "parallax", "generative_api"])).default("remotion"),
   fallback_used: z.boolean().optional(),
   fallback_reason: z.string().nullable().optional(),
   visual: z.object({
@@ -182,6 +190,7 @@ export const ShotSpecSchema = z.object({
     animation_notes: z.string().default("ورود نرم با فیزیک spring و سلسله‌مراتب تایپوگرافی"),
     blender_prompt: z.string().optional(),
     generative_prompt: z.string().optional(),
+    keyframe_path: z.string().optional(),
   }),
   style: z.object({
     palette: z.preprocess(

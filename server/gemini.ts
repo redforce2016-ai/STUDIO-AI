@@ -17,6 +17,7 @@ import type {
 } from "../src/types/studio.js";
 import { executeAgentJsonWithRouter, getGoogleApiKeyFromRouter } from "./router.js";
 import { saveAudioFile, saveImageFile, saveVideoFile, saveVisualSvgFile } from "./store.js";
+import { executeAgentWebResearchMission } from "./agentBrowser.js";
 
 function getClient(apiVersion: "v1beta" | "v1alpha" | "v1" = "v1beta"): GoogleGenAI {
   const apiKey = getGoogleApiKeyFromRouter();
@@ -180,6 +181,26 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
 
   let webResearch = "";
   const sources: GroundedSource[] = [];
+
+  // 1) Programmatic Hidden Agent Browser Web Mission
+  try {
+    const browserMission = await executeAgentWebResearchMission(
+      brief.idea,
+      "ایجنت استراتژیست و تحلیلگر موضوع"
+    );
+    if (browserMission.synthesizedContextFa) {
+      webResearch = browserMission.synthesizedContextFa;
+    }
+    for (const s of browserMission.sources) {
+      if (!sources.some((x) => x.uri === s.uri)) {
+        sources.push(s);
+      }
+    }
+  } catch {
+    // Non-fatal if offline
+  }
+
+  // 2) Augment with Gemini Google Search Grounding if available
   try {
     const ai = getClient();
     const searchRes = await generateWithModelFallback(ai, {
@@ -201,8 +222,12 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
         tools: [{ googleSearch: {} }],
       },
     });
-    webResearch = searchRes.text ?? "";
-    const seen = new Set<string>();
+    if (searchRes.text) {
+      webResearch = webResearch
+        ? `${webResearch}\n\n---\nتکمیل پژوهش از موتور جستجو:\n${searchRes.text}`
+        : searchRes.text;
+    }
+    const seen = new Set<string>(sources.map((s) => s.uri));
     for (const chunk of searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
       if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
         seen.add(chunk.web.uri);
@@ -213,7 +238,7 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
       }
     }
   } catch {
-    webResearch = "";
+    // Keep browserMission findings
   }
 
   const maturityBlock =
@@ -475,6 +500,24 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
   let groundedSummaryText = "";
   const sources: GroundedSource[] = [];
 
+  // Step A.1: Autonomous Hidden Agent Browser Web Mission
+  try {
+    const queryForBrowser = sel?.title ? `${brief.idea} ${sel.title}` : brief.idea;
+    const browserMission = await executeAgentWebResearchMission(
+      queryForBrowser,
+      "ایجنت پژوهشگر و سناریونویس"
+    );
+    if (browserMission.synthesizedContextFa) {
+      groundedSummaryText = browserMission.synthesizedContextFa;
+    }
+    for (const s of browserMission.sources) {
+      sources.push(s);
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  // Step A.2: Grounded Web Search Research (gracefully skipped if quota limited)
   try {
     const ai = getClient();
     const searchRes = await generateWithModelFallback(ai, {
@@ -483,7 +526,11 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
         tools: [{ googleSearch: {} }],
       },
     });
-    groundedSummaryText = searchRes.text ?? "";
+    if (searchRes.text) {
+      groundedSummaryText = groundedSummaryText
+        ? `${groundedSummaryText}\n\n---\nیافته‌های تکمیلی موتور جستجو:\n${searchRes.text}`
+        : searchRes.text;
+    }
     const chunks = searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
     for (const chunk of chunks) {
       if (chunk.web?.uri) {
@@ -494,7 +541,9 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
       }
     }
   } catch {
-    groundedSummaryText = `تحلیل و پژوهش تخصصی موضوع "${brief.title}" با تمرکز بر: ${brief.idea}`;
+    if (!groundedSummaryText) {
+      groundedSummaryText = `تحلیل و پژوهش تخصصی موضوع "${brief.title}" با تمرکز بر: ${brief.idea}`;
+    }
   }
 
   const uniqueSources: GroundedSource[] = [];
@@ -607,24 +656,35 @@ export async function runVoiceoverAgent(
   voiceName: VoicePersona = "Kore",
   voiceStyle?: string,
   feedback?: string,
-  existingNarrationText?: string
+  existingNarrationText?: string,
+  director?: DirectorOutput | null
 ): Promise<VoiceoverOutput> {
   const toneName = TONE_LABELS[brief.tone];
 
   let narrationText = existingNarrationText?.trim() ?? "";
   let resolvedStyle = voiceStyle?.trim() || "گوینده حرفه‌ای، گرم، رسا و پرانرژی فارسی";
   let pacingNotes = "مکث کوتاه بعد از قلاب برای جلب توجه، ریتم پیوسته و تاکید روی اعداد کلیدی.";
-  let estimatedSeconds: number = brief.targetDurationSeconds;
+  let estimatedSeconds: number = director?.totalEstimatedSeconds || brief.targetDurationSeconds;
 
   if (!narrationText) {
+    const shotsCue =
+      director && director.shots.length > 0
+        ? `\nبرنامه زمان‌بندی شات‌های ویدیو (نریشن را دقیقاً هماهنگ با زمان این ${director.shots.length} شات تنظیم کن):\n${director.shots
+            .map(
+              (s) =>
+                `- شات ${s.shotNumber} (${s.timecode} · ${s.durationSeconds}s): ${s.spokenSegment || s.sceneDescriptionFa}`
+            )
+            .join("\n")}`
+        : "";
+
     const adaptPrompt = `شما ایجنت گوینده و کارگردان صدای حرفه‌ای فارسی هستید.
-سناریوی زیر را برای خوانش صوتی (Voiceover) آماده کنید تا روی ریتم ${brief.targetDurationSeconds} ثانیه‌ای کاملاً طبیعی، محاوره‌ای-استاندارد و تاثیرگذار شنیده شود.
+سناریوی زیر را برای خوانش صوتی (Voiceover) آماده کنید تا روی ریتم ${estimatedSeconds} ثانیه‌ای شات‌های ویدیو کاملاً طبیعی، محاوره‌ای-استاندارد و تاثیرگذار شنیده شود.
 
 عنوان: ${script.videoTitle}
 لحن هدف: ${toneName}
 قلاب: ${script.hook}
 بدنه: ${script.body}
-دعوت به اقدام: ${script.cta}
+دعوت به اقدام: ${script.cta}${shotsCue}
 ${feedback ? `بازخورد اصلاحی کاربر: ${feedback}` : ""}
 
 نکات مهم:
@@ -726,11 +786,11 @@ ${feedback ? `بازخورد اصلاحی کاربر: ${feedback}` : ""}
 }
 
 /**
- * Agent 3: Director / Decoupage Agent
+ * Agent 2: Director / Storyboard Decoupage Agent (runs before Voiceover in studio order)
  */
 export async function runDirectorAgent(
   script: ResearchAndScriptOutput,
-  voiceover: VoiceoverOutput,
+  voiceover: VoiceoverOutput | null | undefined,
   brief: ProjectBrief,
   feedback?: string
 ): Promise<DirectorOutput> {
@@ -740,16 +800,20 @@ export async function runDirectorAgent(
     ? CONTENT_FORMAT_LABELS[brief.contentFormat]
     : PLATFORM_LABELS[brief.platform] || "ویدیوی کوتاه";
 
-  const prompt = `شما کارگردان و طراح دکوپاژ حرفه‌ای محتوای شبکه‌های اجتماعی هستید.
-بر اساس سناریو و متن نریشن تاییدشده، کل محتوا را متناسب با فرمت «${formatName}» به ${desiredShotCount} شات/فریم دقیق و سینمایی بشکنید.
+  const referenceScriptText =
+    voiceover?.narrationText?.trim() ||
+    `قلاب (Hook): ${script.hook}\nبدنه اصلی: ${script.body}\nدعوت به اقدام (CTA): ${script.cta}`;
+
+  const prompt = `شما کارگردان و طراح استوری‌بورد و دکوپاژ حرفه‌ای محتوای شبکه‌های اجتماعی هستید.
+بر اساس سناریوی تاییدشده، کل محتوا را متناسب با فرمت «${formatName}» به ${desiredShotCount} شات/فریم دقیق و سینمایی بشکنید.
 تمام خروجی‌ها باید به زبان فارسی دقیق و حرفه‌ای باشد.
 
 عنوان ویدیو: ${script.videoTitle}
 پلتفرم: ${PLATFORM_LABELS[brief.platform] || brief.platform} (${formatName})
 مدت‌زمان هدف: ${brief.targetDurationSeconds} ثانیه
-متن نریشن:
-${voiceover.narrationText}
-${feedback ? `بازخورد اصلاحی کاربر برای دکوپاژ: ${feedback}` : ""}
+متن سناریو و گفتار:
+${referenceScriptText}
+${feedback ? `بازخورد اصلاحی کاربر برای استوری‌بورد و دکوپاژ: ${feedback}` : ""}
 
 الزامات هر شات:
 - shotNumber: شماره ترتیبی شات (۱، ۲، ...)
@@ -1078,7 +1142,8 @@ export async function runStudioImageAgent(params: {
 }
 
 /**
- * Studio Video Generation (Text-to-Video & Image-to-Video) using gemini-omni-1.2-flash via Interactions API
+ * Studio Video Generation — Local Keyframe Animation ONLY (ComfyUI local server + Parallax fallback).
+ * Strictly enforces Image-to-Video only; Text-to-Video without a keyframe is forbidden.
  */
 export async function runStudioVideoAgent(params: {
   prompt: string;
@@ -1087,52 +1152,82 @@ export async function runStudioVideoAgent(params: {
   resolution?: "720p" | "1080p";
   imageBase64?: string;
   mimeType?: string;
-}): Promise<{ videoUrl: string; mimeType: string }> {
-  const ai = getClient();
-
-  const input = params.imageBase64
-    ? [
-        {
-          type: "image" as const,
-          mime_type: params.mimeType || "image/png",
-          data: params.imageBase64,
-        },
-        {
-          type: "text" as const,
-          text: params.prompt,
-        },
-      ]
-    : params.prompt;
-
-  const interaction = await ai.interactions.create(
-    {
-      model: "gemini-omni-1.2-flash",
-      input: input as never,
-      background: false,
-      store: false,
-      stream: false,
-      response_format: {
-        type: "video",
-        aspect_ratio: params.aspectRatio || "16:9",
-        duration: params.duration || "8s",
-        resolution: params.resolution || "720p",
-      } as never,
-    },
-    { timeout: 300000 }
-  );
-
-  const videoPart = interaction.output_video;
-  if (!videoPart || !videoPart.data) {
-    throw new Error("مدل ویدیوساز Omni 1.2 Flash فایل ویدیویی برنگرداند.");
+}): Promise<{
+  videoUrl: string;
+  mimeType: string;
+  providerUsed: "comfyui" | "parallax";
+  renderDurationMs: number;
+  vramUsedMb: number;
+  attempts: number;
+  fallbackTriggered: boolean;
+}> {
+  if (!params.imageBase64 || !params.imageBase64.trim()) {
+    throw new Error(
+      "قانون کیفیت شماره ۴: تولید ویدیو از متن (Text-to-Video) ممنوع است. فقط متحرک‌سازی تصویر کلیدی (Image-to-Video) با ComfyUI محلی یا Parallax مجاز است."
+    );
   }
 
-  const videoBuffer = Buffer.from(videoPart.data, "base64");
-  const filename = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
-  const videoUrl = saveVideoFile(filename, videoBuffer);
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const { getVideosDir, getImagesDir } = await import("./store.js");
+  const { ComfyUIProvider } = await import("./video/providers/comfyui.js");
+
+  const ext =
+    params.mimeType?.includes("svg")
+      ? "svg"
+      : params.mimeType?.includes("jpeg") || params.mimeType?.includes("jpg")
+        ? "jpg"
+        : "png";
+  const keyframeFilename = `kf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+  const keyframePath = pathMod.join(getImagesDir(), keyframeFilename);
+  fsMod.writeFileSync(keyframePath, Buffer.from(params.imageBase64, "base64"));
+
+  const durationSecMap: Record<string, number> = {
+    "5s": 5,
+    "8s": 8,
+    "10s": 10,
+    "15s": 15,
+  };
+  const durationSec = durationSecMap[params.duration || "5s"] || 4;
+  const aspect = params.aspectRatio === "16:9" ? "16:9" : "9:16";
+  const qualityMode = params.resolution === "1080p" ? "final_1080p" : "preview_480p";
+  const [width, height] =
+    qualityMode === "final_1080p"
+      ? aspect === "16:9"
+        ? [1920, 1080]
+        : [1080, 1920]
+      : aspect === "16:9"
+        ? [854, 480]
+        : [480, 854];
+
+  const outFilename = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
+  const outputPath = pathMod.join(getVideosDir(), outFilename);
+
+  const provider = new ComfyUIProvider();
+  const result = await provider.generateClip({
+    shotId: `studio_${Date.now()}`,
+    prompt: params.prompt,
+    keyframePath,
+    aspectRatio: aspect,
+    durationSec,
+    resolution: qualityMode === "final_1080p" ? "1080p" : "480p",
+    visualCriticApprovedPreview: qualityMode === "final_1080p",
+    width,
+    height,
+    fps: 30,
+    outputPath,
+    cameraMotion: "push-in",
+    qualityMode,
+  });
 
   return {
-    videoUrl,
-    mimeType: videoPart.mime_type || "video/mp4",
+    videoUrl: `/api/media/videos/${outFilename}`,
+    mimeType: "video/mp4",
+    providerUsed: result.providerUsed,
+    renderDurationMs: result.totalDurationMs,
+    vramUsedMb: result.vramUsedMb,
+    attempts: result.attempts,
+    fallbackTriggered: result.fallbackUsed,
   };
 }
 
@@ -1182,29 +1277,53 @@ export async function runQuickSearchResearch(query: string): Promise<{
   summary: string;
   sources: GroundedSource[];
 }> {
-  const ai = getClient();
-  const res = await generateWithModelFallback(ai, {
-    contents: `درباره موضوع زیر با جستجوی به‌روز وب تحقیق کن و خلاصه دقیق، آمار و نکات کلیدی را به فارسی روان بنویس:\n${query}`,
-    config: {
-      tools: [{ googleSearch: {} }],
-    },
-  });
-
   const sources: GroundedSource[] = [];
   const seen = new Set<string>();
-  const chunks = res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-  for (const chunk of chunks) {
-    if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
-      seen.add(chunk.web.uri);
-      sources.push({
-        title: chunk.web.title || chunk.web.uri,
-        uri: chunk.web.uri,
-      });
+  let browserText = "";
+
+  try {
+    const mission = await executeAgentWebResearchMission(query, "ایجنت دستیار پژوهش سریع وب");
+    browserText = mission.synthesizedContextFa;
+    for (const s of mission.sources) {
+      if (!seen.has(s.uri)) {
+        seen.add(s.uri);
+        sources.push(s);
+      }
     }
+  } catch {
+    // Non-fatal
   }
 
-  return {
-    summary: (res.text ?? "").trim(),
-    sources: sources.slice(0, 8),
-  };
+  try {
+    const ai = getClient();
+    const res = await generateWithModelFallback(ai, {
+      contents: `درباره موضوع زیر با جستجوی به‌روز وب تحقیق کن و خلاصه دقیق، آمار و نکات کلیدی را به فارسی روان بنویس:\n${query}\n${
+        browserText ? `\nاطلاعات استخراج‌شده توسط مرورگر ایجنت:\n${browserText}` : ""
+      }`,
+      config: {
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const chunks = res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+    for (const chunk of chunks) {
+      if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
+        seen.add(chunk.web.uri);
+        sources.push({
+          title: chunk.web.title || chunk.web.uri,
+          uri: chunk.web.uri,
+        });
+      }
+    }
+
+    return {
+      summary: (res.text ?? browserText).trim(),
+      sources: sources.slice(0, 8),
+    };
+  } catch {
+    return {
+      summary: browserText.trim() || `پژوهش وب برای «${query}» انجام شد.`,
+      sources: sources.slice(0, 8),
+    };
+  }
 }

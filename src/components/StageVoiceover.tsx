@@ -66,7 +66,7 @@ export function StageVoiceover({
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#262B38] pb-5">
         <div>
           <div className="flex items-center gap-2 text-xs text-amber-400">
-            <span>مرحله ۲ · صدای گوینده</span>
+            <span>مرحله ۴ · ساخت صدا برای ویدیو</span>
             <span aria-hidden="true" className="text-slate-600">·</span>
             <span className="text-slate-400">
               {isCurrentGate ? "آماده گوش دادن و تایید شما" : "بازبینی متن و صدا"}
@@ -230,7 +230,7 @@ export function StageVoiceover({
             onClick={() => onApprove(draft)}
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50 whitespace-nowrap shrink-0"
           >
-            <span>{isRunning ? "در حال تدوین دکوپاژ..." : "تایید نریشن و ارسال به کارگردان"}</span>
+            <span>{isRunning ? "در حال آماده‌سازی میز تدوین..." : "تایید صدا و ورود به تدوین نهایی"}</span>
             <ArrowLeft className="h-4 w-4" />
           </button>
         </div>

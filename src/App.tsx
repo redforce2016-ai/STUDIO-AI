@@ -5,34 +5,36 @@ import {
   CheckCircle2,
   Clock,
   ExternalLink,
+  Globe,
   PauseCircle,
   Plus,
   Sparkles,
 } from "lucide-react";
+import { AgentBrowserDrawer } from "./components/AgentBrowserDrawer";
 import {
   FORMATS_BY_PLATFORM,
   GuidedStudioChat,
   type ChatTimelineMessage,
 } from "./components/GuidedStudioChat";
-import { MediaStudioView } from "./components/MediaStudioView";
 import { ProjectsAndDesktopView } from "./components/ProjectsAndDesktopView";
 import { RouterSettingsView } from "./components/RouterSettingsView";
-import { StageDirector } from "./components/StageDirector";
+import { StageAssembly } from "./components/StageAssembly";
 import { StageResearchScript } from "./components/StageResearchScript";
-import { StageVisuals } from "./components/StageVisuals";
+import { StageStoryboard } from "./components/StageStoryboard";
+import { StageVideoShots } from "./components/StageVideoShots";
 import { StageVoiceover } from "./components/StageVoiceover";
 import {
-  deleteMediaAssetFromFirestore,
   deleteProjectFromFirestore,
   signInWithGoogle,
   signOutUser,
   subscribeAuthState,
   subscribeUserCloudProjects,
-  syncMediaAssetToFirestore,
   syncProjectToFirestore,
   type CloudProjectSummary,
 } from "./lib/firebase";
 import type {
+  AgentBrowserCommandType,
+  AgentBrowserState,
   ContentFormatOption,
   DirectorOutput,
   PageMaturityOption,
@@ -41,30 +43,35 @@ import type {
   ProjectBrief,
   ProjectRecord,
   ResearchAndScriptOutput,
-  StudioMediaAsset,
   TopicAnalysisResponse,
   ViralTopicProposal,
   VoicePersona,
   VoiceoverOutput,
+  WebStudioGenerationMode,
+  WebStudioModelOption,
+  WebStudioSiteConfig,
+  WebStudioSiteId,
 } from "./types/studio";
 import type { VideoAspectFormat, VideoQualityMode } from "./types/videoPipeline";
 
-type AppTab = "workspace" | "studio" | "projects" | "router";
+type AppTab = "workspace" | "projects" | "router";
 
 const STEP_ITEMS: Array<{ stage: PipelineStage; num: string; label: string }> = [
   { stage: "research_script", num: "۱", label: "سناریو" },
-  { stage: "voiceover", num: "۲", label: "صدای گوینده" },
-  { stage: "director", num: "۳", label: "چیدمان صحنه" },
-  { stage: "visuals", num: "۴", label: "تصویرسازی" },
+  { stage: "storyboard", num: "۲", label: "استوری‌بورد" },
+  { stage: "video_shots", num: "۳", label: "ساخت شات‌های ویدیو" },
+  { stage: "voiceover", num: "۴", label: "ساخت صدا" },
+  { stage: "assembly", num: "۵", label: "تدوین و مونتاژ نهایی" },
 ];
 
 const STAGE_RANK: Record<PipelineStage, number> = {
   input: 0,
   research_script: 1,
-  voiceover: 2,
-  director: 3,
-  visuals: 4,
-  completed: 5,
+  storyboard: 2,
+  video_shots: 3,
+  voiceover: 4,
+  assembly: 5,
+  completed: 6,
 };
 
 const PLATFORM_NAMES: Record<string, string> = {
@@ -108,7 +115,188 @@ export default function App() {
   const [pendingBrief, setPendingBrief] = useState<ProjectBrief | null>(null);
   const [pendingAnalysis, setPendingAnalysis] = useState<TopicAnalysisResponse | null>(null);
 
+  // Hidden Agent Browser & Slide-Over Inspector Drawer state
+  const [isBrowserDrawerOpen, setIsBrowserDrawerOpen] = useState(false);
+  const [browserState, setBrowserState] = useState<AgentBrowserState | null>(null);
+  const [isExecutingBrowserCmd, setIsExecutingBrowserCmd] = useState(false);
+
   const activeProject = projects.find((p) => p.id === selectedProjectId) ?? null;
+
+  const fetchBrowserState = useCallback(async () => {
+    try {
+      const res = await fetch("/api/browser/state");
+      if (!res.ok) return;
+      const data = (await res.json()) as { browser?: AgentBrowserState };
+      if (data.browser) {
+        setBrowserState(data.browser);
+      }
+    } catch {
+      // Ignore transient poll errors
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchBrowserState();
+  }, [fetchBrowserState]);
+
+  useEffect(() => {
+    if (!isBrowserDrawerOpen && !isAnalyzing && !isRunning) return;
+    const timer = setInterval(() => {
+      void fetchBrowserState();
+    }, 1800);
+    return () => clearInterval(timer);
+  }, [isBrowserDrawerOpen, isAnalyzing, isRunning, fetchBrowserState]);
+
+  const handleDispatchBrowserCommand = useCallback(
+    async (command: AgentBrowserCommandType, target: string, agentName?: string) => {
+      setIsExecutingBrowserCmd(true);
+      try {
+        const res = await fetch("/api/browser/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command, target, agentName }),
+        });
+        const data = (await res.json()) as { browser?: AgentBrowserState; error?: string };
+        if (!res.ok) {
+          throw new Error(data.error || "خطا در اجرای دستور مرورگر ایجنت");
+        }
+        if (data.browser) {
+          setBrowserState(data.browser);
+        }
+      } catch (err) {
+        setErrorBanner(
+          err instanceof Error ? err.message : "خطا در ارتباط با مرورگر مخفی ایجنت"
+        );
+      } finally {
+        setIsExecutingBrowserCmd(false);
+      }
+    },
+    []
+  );
+
+  const handleClearBrowserState = useCallback(async () => {
+    setIsExecutingBrowserCmd(true);
+    try {
+      const res = await fetch("/api/browser/clear", { method: "POST" });
+      const data = (await res.json()) as { browser?: AgentBrowserState };
+      if (data.browser) {
+        setBrowserState(data.browser);
+      }
+    } finally {
+      setIsExecutingBrowserCmd(false);
+    }
+  }, []);
+
+  const handleAddBrowserProfile = useCallback(
+    async (input: { name: string; email: string; password?: string; dailyLimit: number }) => {
+      setIsExecutingBrowserCmd(true);
+      try {
+        const res = await fetch("/api/browser/profiles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const data = (await res.json()) as { browser?: AgentBrowserState; error?: string };
+        if (!res.ok) throw new Error(data.error || "خطا در افزودن پروفایل گوگل");
+        if (data.browser) setBrowserState(data.browser);
+      } catch (err) {
+        setErrorBanner(err instanceof Error ? err.message : "خطا در ثبت پروفایل گوگل");
+      } finally {
+        setIsExecutingBrowserCmd(false);
+      }
+    },
+    []
+  );
+
+  const handleSwitchBrowserProfile = useCallback(async (profileId: string) => {
+    setIsExecutingBrowserCmd(true);
+    try {
+      const res = await fetch(`/api/browser/profiles/${profileId}/switch`, {
+        method: "POST",
+      });
+      const data = (await res.json()) as { browser?: AgentBrowserState };
+      if (data.browser) setBrowserState(data.browser);
+    } finally {
+      setIsExecutingBrowserCmd(false);
+    }
+  }, []);
+
+  const handleResetBrowserQuota = useCallback(async (profileId?: string) => {
+    setIsExecutingBrowserCmd(true);
+    try {
+      const res = await fetch("/api/browser/profiles/reset-quota", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileId }),
+      });
+      const data = (await res.json()) as { browser?: AgentBrowserState };
+      if (data.browser) setBrowserState(data.browser);
+    } finally {
+      setIsExecutingBrowserCmd(false);
+    }
+  }, []);
+
+  const handleUpdateBrowserSiteConfig = useCallback(
+    async (patch: Partial<WebStudioSiteConfig>) => {
+      try {
+        const res = await fetch("/api/browser/site-config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        const data = (await res.json()) as { browser?: AgentBrowserState };
+        if (data.browser) setBrowserState(data.browser);
+      } catch {
+        // ignore
+      }
+    },
+    []
+  );
+
+  const handleGenerateBrowserStudioShot = useCallback(
+    async (params: {
+      rawPrompt: string;
+      projectId?: string | null;
+      shotNumber?: number | null;
+      siteId: WebStudioSiteId;
+      mode: WebStudioGenerationMode;
+      modelId: WebStudioModelOption;
+      aspectRatio: "9:16" | "16:9" | "1:1";
+      resolution: "720p" | "1080p";
+    }) => {
+      setIsExecutingBrowserCmd(true);
+      try {
+        const res = await fetch("/api/browser/studio/generate-shot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+        });
+        const data = (await res.json()) as {
+          browser?: AgentBrowserState;
+          project?: ProjectRecord | null;
+          error?: string;
+        };
+        if (!res.ok) {
+          throw new Error(data.error || "خطا در ساخت شات با مرورگر ایجنت");
+        }
+        if (data.browser) {
+          setBrowserState(data.browser);
+        }
+        if (data.project) {
+          setProjects((prev) =>
+            prev.map((p) => (p.id === data.project!.id ? data.project! : p))
+          );
+        }
+      } catch (err) {
+        setErrorBanner(
+          err instanceof Error ? err.message : "خطا در اجرای رندر شات در مرورگر ایجنت"
+        );
+      } finally {
+        setIsExecutingBrowserCmd(false);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     const unsub = subscribeAuthState((user) => {
@@ -185,7 +373,7 @@ export default function App() {
       return [proj, ...prev];
     });
     setSelectedProjectId(proj.id);
-    setViewingStage(proj.currentStage === "completed" ? "visuals" : proj.currentStage);
+    setViewingStage(proj.currentStage === "completed" ? "assembly" : proj.currentStage);
   };
 
   const handleStartNewProject = () => {
@@ -199,14 +387,9 @@ export default function App() {
     setErrorBanner(null);
   };
 
-  const handleUseTranscriptAsIdea = (text: string) => {
-    handleStartNewProject();
-    setDraftIdea(text);
-  };
-
   const handleOpenProject = (proj: ProjectRecord) => {
     setSelectedProjectId(proj.id);
-    setViewingStage(proj.currentStage === "completed" ? "visuals" : proj.currentStage);
+    setViewingStage(proj.currentStage === "completed" ? "assembly" : proj.currentStage);
     setPendingBrief(null);
     setPendingAnalysis(null);
     setChatMessages([
@@ -403,13 +586,15 @@ export default function App() {
 
       if (payload.action === "approve") {
         const nextStageMsg =
-          nextProj.currentStage === "voiceover"
-            ? "صدای گوینده و متن گفتار آماده شد. گوش دهید و اگر مناسب بود تایید کنید."
-            : nextProj.currentStage === "director"
-              ? "چیدمان صحنه‌ها و زاویه دوربین آماده شد."
-              : nextProj.currentStage === "visuals"
-                ? "تصاویر پیش‌نمایش صحنه‌ها آماده است."
-                : "تبریک! پروژه شما با موفقیت نهایی و آماده شد.";
+          nextProj.currentStage === "storyboard"
+            ? "استوری‌بورد و دکوپاژ شات‌ها همراه با تصاویر کلیدی آماده شد. بررسی و تایید کنید."
+            : nextProj.currentStage === "video_shots"
+              ? "وارد مرحله ساخت شات‌های ویدیو و چیدمان سه‌بعدی شدید. هر شات را تولید و تایید کنید."
+              : nextProj.currentStage === "voiceover"
+                ? "متن و فایل صدای گوینده متناسب با زمان شات‌ها آماده شد. گوش دهید و تایید کنید."
+                : nextProj.currentStage === "assembly"
+                  ? "وارد میز تدوین، میکس و مونتاژ نهایی شدید. خروجی MP4 را رندر و نهایی کنید."
+                  : "تبریک! پروژه شما با موفقیت کامل تدوین و نهایی شد.";
         setChatMessages((prev) => [
           ...prev,
           { id: `a_adv_${Date.now()}`, role: "assistant", text: nextStageMsg },
@@ -616,10 +801,12 @@ export default function App() {
 
   const isStageAccessible = (stage: PipelineStage): boolean => {
     if (!activeProject) return false;
+    const activeRank = STAGE_RANK[activeProject.currentStage];
     if (stage === "research_script") return Boolean(activeProject.researchScript);
+    if (stage === "storyboard") return Boolean(activeProject.director);
+    if (stage === "video_shots") return activeRank >= STAGE_RANK.video_shots && Boolean(activeProject.director);
     if (stage === "voiceover") return Boolean(activeProject.voiceover);
-    if (stage === "director") return Boolean(activeProject.director);
-    if (stage === "visuals") return Boolean(activeProject.visuals);
+    if (stage === "assembly") return activeRank >= STAGE_RANK.assembly;
     return false;
   };
 
@@ -643,7 +830,6 @@ export default function App() {
         <nav className="flex items-center gap-7 overflow-x-auto text-xs font-medium text-slate-400">
           {[
             { id: "workspace", label: "میز کار هوشمند" },
-            { id: "studio", label: "تصویر، ویدیو و ۳بعدی" },
             { id: "projects", label: "پروژه‌ها و نسخه ویندوز" },
             { id: "router", label: "روتر مدل‌ها" },
           ].map((tab) => (
@@ -662,14 +848,44 @@ export default function App() {
           ))}
         </nav>
 
-        <button
-          type="button"
-          onClick={handleStartNewProject}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 whitespace-nowrap shrink-0"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          <span>شروع ایده جدید</span>
-        </button>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              void fetchBrowserState();
+              setIsBrowserDrawerOpen(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-[#2A3142] bg-[#141925] px-3.5 py-2 text-xs font-semibold text-slate-200 transition-colors hover:border-sky-500/50 hover:text-sky-300 whitespace-nowrap shrink-0"
+            title="مشاهده زنده مرورگر مخفی ایجنت (پنجره کشویی)"
+          >
+            <Globe
+              className={`h-3.5 w-3.5 ${
+                isAnalyzing ||
+                isRunning ||
+                isExecutingBrowserCmd ||
+                browserState?.status === "browsing" ||
+                browserState?.status === "extracting"
+                  ? "animate-spin text-amber-400"
+                  : "text-sky-400"
+              }`}
+            />
+            <span>مرورگر مخفی ایجنت</span>
+            {browserState && browserState.actionLog.length > 0 && (
+              <span className="font-mono text-[11px] font-bold text-amber-400 tabular-nums">
+                ({browserState.actionLog.length})
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleStartNewProject}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 whitespace-nowrap shrink-0"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>شروع ایده جدید</span>
+          </button>
+        </div>
       </header>
 
       {/* Main Content */}
@@ -690,19 +906,7 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "studio" ? (
-          <MediaStudioView
-            userUid={firebaseUser?.uid ?? null}
-            activeProject={activeProject}
-            onSyncAssetToCloud={async (asset: StudioMediaAsset) => {
-              if (firebaseUser) await syncMediaAssetToFirestore(firebaseUser.uid, asset);
-            }}
-            onDeleteCloudAsset={async (id: string) => {
-              if (firebaseUser) await deleteMediaAssetFromFirestore(id);
-            }}
-            onUseTextAsIdea={handleUseTranscriptAsIdea}
-          />
-        ) : activeTab === "projects" ? (
+        {activeTab === "projects" ? (
           <ProjectsAndDesktopView
             projects={projects}
             selectedProjectId={selectedProjectId}
@@ -718,7 +922,7 @@ export default function App() {
         ) : activeTab === "router" ? (
           <RouterSettingsView />
         ) : (
-          /* Two-Pane Guided Workspace: Right = Chat Box, Left = Progressive Output Canvas */
+          /* Two-Pane Guided Workspace: Right = Chat Box, Left = 5-Stage Real Studio Canvas */
           <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
             {/* RIGHT PANE (first in RTL grid): Guided Chat Box */}
             <div className="lg:sticky lg:top-20 lg:col-span-5">
@@ -743,10 +947,10 @@ export default function App() {
               />
             </div>
 
-            {/* LEFT PANE (second in RTL grid): Clean 4-Step Progressive Output Canvas */}
+            {/* LEFT PANE (second in RTL grid): Clean 5-Step Real Studio Progress Canvas */}
             <div className="space-y-5 lg:col-span-7">
-              {/* Calm 4-Step Horizontal Progress Strip */}
-              <div className="grid grid-cols-4 gap-2 rounded-2xl border border-[#262B38] bg-[#14171F] p-2">
+              {/* Calm 5-Step Horizontal Progress Strip */}
+              <div className="grid grid-cols-2 gap-2 rounded-2xl border border-[#262B38] bg-[#14171F] p-2 sm:grid-cols-5">
                 {STEP_ITEMS.map((step) => {
                   const accessible = isStageAccessible(step.stage);
                   const isViewing = Boolean(activeProject) && viewingStage === step.stage;
@@ -983,39 +1187,45 @@ export default function App() {
                   <div className="space-y-2">
                     <div className="inline-flex items-center gap-2 text-xs font-semibold text-amber-400">
                       <Sparkles className="h-4 w-4" />
-                      <span>مسیر ساده تولید محتوای حرفه‌ای</span>
+                      <span>مسیر استاندارد استودیوی واقعی تولید ویدیو</span>
                     </div>
                     <h1 className="text-xl font-bold text-slate-100">
-                      از ایده خام تا سناریو، صدا و تصویرسازی در ۴ قدم ساده
+                      تولید حرفه‌ای ویدیو در ۵ مرحله واقعی (سناریو تا مونتاژ نهایی)
                     </h1>
                     <p className="text-xs leading-7 text-slate-400">
-                      بدون نیاز به تنظیمات پیچیده؛ کافی است در کادر چت سمت راست ایده خود را بنویسید.
+                      بدون پیچیدگی اضافه؛ در کادر سمت راست ایده را بنویسید تا پروژه طبق ترتیب استودیویی جلو برود.
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۱. پلتفرم و فرمت را انتخاب کنید</div>
+                      <div className="text-xs font-bold text-amber-400">۱. سناریو</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        بگویید برای اینستاگرام (ریلز، پست، استوری)، یوتیوب یا تیک‌تاک تولید می‌کنید.
+                        تحقیق در وب با مرورگر ایجنت و نگارش سناریو با قلاب و بدنه مهندسی‌شده.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۲. ۳ پیشنهاد وایرال بگیرید</div>
+                      <div className="text-xs font-bold text-amber-400">۲. استوری‌بورد</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        ایده شما از نگاه استراتژیست، روانشناسی و تولیدکننده حرفه‌ای بررسی و ۳ زاویه پربازدید پیشنهاد می‌شود.
+                        دکوپاژ دقیق، زاویه دوربین، متن روی کادر و فریم‌های استوری‌بورد هر شات.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۳. سناریو و صدای گوینده</div>
+                      <div className="text-xs font-bold text-amber-400">۳. ساخت شات‌های ویدیو</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        متن کامل سناریو همراه با فایل صوتی گوینده آماده می‌شود و هر قسمتی را بخواهید ویرایش می‌کنید.
+                        تولید کلیپ شات‌ها با مرورگر ایجنت (Google Flow / Veo 2 / Leonardo) و چیدمان سه‌بعدی Three.js.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۴. صحنه‌بندی و تصویرسازی</div>
+                      <div className="text-xs font-bold text-amber-400">۴. ساخت صدا برای ویدیو</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        برنامه دقیق هر صحنه، زاویه دوربین، زیرنویس و پیش‌نمایش تصویری شات‌ها تحویل می‌گیرید.
+                        تنظیم متن نریشن منطبق با زمان شات‌ها و ضبط صوت WAV با گوینده فارسی.
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4 sm:col-span-2 lg:col-span-2">
+                      <div className="text-xs font-bold text-amber-400">۵. تدوین، میکس و مونتاژ نهایی</div>
+                      <p className="mt-1.5 text-xs leading-6 text-slate-300">
+                        میکس شات‌های ویدیویی و صدای گوینده در Remotion + FFmpeg، زیرنویس فارسی و خروجی MP4 آماده انتشار.
                       </p>
                     </div>
                   </div>
@@ -1033,6 +1243,41 @@ export default function App() {
                     handleResumeCheckpoint({ action: "regenerate", feedback })
                   }
                 />
+              ) : viewingStage === "storyboard" && activeProject.director ? (
+                <StageStoryboard
+                  director={activeProject.director}
+                  visuals={activeProject.visuals}
+                  isRunning={isRunning}
+                  isCurrentGate={activeProject.currentStage === "storyboard"}
+                  onSaveEdits={(updated) => handleSaveInline({ director: updated })}
+                  onRegenerateShot={handleRegenerateSingleShot}
+                  onApprove={(updated) =>
+                    handleResumeCheckpoint({ action: "approve", director: updated })
+                  }
+                  onRegenerateAll={(feedback) =>
+                    handleResumeCheckpoint({ action: "regenerate", feedback })
+                  }
+                />
+              ) : viewingStage === "video_shots" && activeProject.director ? (
+                <StageVideoShots
+                  project={activeProject}
+                  visuals={activeProject.visuals}
+                  directorShots={activeProject.director.shots}
+                  browserState={browserState}
+                  isRunning={isRunning}
+                  isExecutingBrowserCmd={isExecutingBrowserCmd}
+                  isCurrentGate={activeProject.currentStage === "video_shots"}
+                  onRegenerateShot={handleRegenerateSingleShot}
+                  onGenerateWebStudioShot={handleGenerateBrowserStudioShot}
+                  onOpenBrowserDrawer={() => {
+                    void fetchBrowserState();
+                    setIsBrowserDrawerOpen(true);
+                  }}
+                  onRegenerateAll={(feedback) =>
+                    handleResumeCheckpoint({ action: "regenerate", feedback })
+                  }
+                  onApprove={() => handleResumeCheckpoint({ action: "approve" })}
+                />
               ) : viewingStage === "voiceover" && activeProject.voiceover ? (
                 <StageVoiceover
                   data={activeProject.voiceover}
@@ -1047,43 +1292,44 @@ export default function App() {
                     handleResumeCheckpoint({ action: "regenerate", feedback })
                   }
                 />
-              ) : viewingStage === "director" && activeProject.director ? (
-                <StageDirector
-                  data={activeProject.director}
-                  isRunning={isRunning}
-                  isCurrentGate={activeProject.currentStage === "director"}
-                  onSaveEdits={(updated) => handleSaveInline({ director: updated })}
-                  onApprove={(updated) =>
-                    handleResumeCheckpoint({ action: "approve", director: updated })
-                  }
-                  onRegenerate={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                />
-              ) : viewingStage === "visuals" && activeProject.visuals ? (
-                <StageVisuals
-                  projectId={activeProject.id}
+              ) : viewingStage === "assembly" ? (
+                <StageAssembly
                   platform={activeProject.brief.platform}
                   contentFormat={activeProject.brief.contentFormat}
-                  data={activeProject.visuals}
-                  directorShots={activeProject.director?.shots ?? []}
                   videoProduction={activeProject.videoProduction}
                   isRunning={isRunning}
                   isCompleted={activeProject.currentStage === "completed"}
-                  onRegenerateShot={handleRegenerateSingleShot}
-                  onRegenerateAll={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                  onFinalize={() => handleResumeCheckpoint({ action: "approve" })}
-                  onExportBible={() => handleExportMarkdown(activeProject)}
                   onStartVideoRender={handleStartVideoRender}
                   onRetryVideoShot={handleRetryVideoShot}
+                  onExportBible={() => handleExportMarkdown(activeProject)}
+                  onFinalize={() => handleResumeCheckpoint({ action: "approve" })}
                 />
               ) : null}
             </div>
           </div>
         )}
       </main>
+
+      {/* Slide-over Hidden Agent Browser Inspector Window */}
+      <AgentBrowserDrawer
+        isOpen={isBrowserDrawerOpen}
+        onClose={() => setIsBrowserDrawerOpen(false)}
+        browserState={browserState}
+        activeProject={activeProject}
+        isExecutingCommand={isExecutingBrowserCmd}
+        onDispatchCommand={handleDispatchBrowserCommand}
+        onAddProfile={handleAddBrowserProfile}
+        onSwitchProfile={handleSwitchBrowserProfile}
+        onResetQuota={handleResetBrowserQuota}
+        onUpdateSiteConfig={handleUpdateBrowserSiteConfig}
+        onGenerateStudioShot={handleGenerateBrowserStudioShot}
+        onClearBrowser={handleClearBrowserState}
+        onRefreshState={fetchBrowserState}
+        onApplyExtractedToIdea={(extractedText) => {
+          setActiveTab("workspace");
+          setDraftIdea(extractedText);
+        }}
+      />
     </div>
   );
 }

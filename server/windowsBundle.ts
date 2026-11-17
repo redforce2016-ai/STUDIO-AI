@@ -173,13 +173,92 @@ def checkpoint_1_script_gate(state: ContentStudioState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 2: Voiceover Agent + Gemini TTS WAV Output
+# Node 2: Storyboard (Director Decoupage + Keyframe Generation)
+# ---------------------------------------------------------------------------
+def storyboard_node(state: ContentStudioState) -> dict:
+    client = get_gemini_client()
+    script = state["research_script"]
+    prompt = (
+        f"سناریوی زیر را به شات‌های دقیق دکوپاژ و استوری‌بورد عمودی ۹:۱۶ به فارسی تبدیل کن:\\n"
+        f"قلاب: {script['hook']}\\nبدنه: {script['body']}\\nپایان: {script['cta']}"
+    )
+    res = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=DirectorOutput,
+        ),
+    )
+    director_data = json.loads(res.text)
+    assets = []
+    for shot in director_data["shots"]:
+        img_path = MEDIA_DIR / f"{state['project_id']}_shot_{shot['shot_number']}.png"
+        img_res = client.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=f"Vertical 9:16 cinematic storyboard frame: {shot['visual_prompt_fa']}",
+        )
+        for part in img_res.candidates[0].content.parts:
+            if part.inline_data and part.inline_data.data:
+                img_path.write_bytes(part.inline_data.data)
+                break
+        assets.append({
+            "shot_number": shot["shot_number"],
+            "image_path": str(img_path),
+            "motion_cue": shot["camera_movement"],
+            "status": "ready",
+        })
+    return {
+        "current_stage": "storyboard",
+        "director": director_data,
+        "visuals": assets,
+        "feedback": None,
+    }
+
+
+def checkpoint_2_storyboard_gate(state: ContentStudioState) -> dict:
+    decision = interrupt({
+        "checkpoint": "checkpoint_2_storyboard",
+        "stage": "storyboard",
+        "data": {"director": state["director"], "visuals": state["visuals"]},
+    })
+    if decision.get("action") == "regenerate":
+        return {"next_action": "regenerate", "feedback": decision.get("feedback")}
+    return {
+        "next_action": "approve",
+        "director": decision.get("director", state["director"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node 3: Video Shots Production (Per-Shot Video & 3D Scene Stage)
+# ---------------------------------------------------------------------------
+def video_shots_node(state: ContentStudioState) -> dict:
+    return {
+        "current_stage": "video_shots",
+        "feedback": None,
+    }
+
+
+def checkpoint_3_video_shots_gate(state: ContentStudioState) -> dict:
+    decision = interrupt({
+        "checkpoint": "checkpoint_3_video_shots",
+        "stage": "video_shots",
+        "data": state["visuals"],
+    })
+    if decision.get("action") == "regenerate":
+        return {"next_action": "regenerate", "feedback": decision.get("feedback")}
+    return {"next_action": "approve"}
+
+
+# ---------------------------------------------------------------------------
+# Node 4: Voiceover Agent + Gemini TTS WAV Output
 # ---------------------------------------------------------------------------
 def voiceover_node(state: ContentStudioState) -> dict:
     client = get_gemini_client()
     script = state["research_script"]
     adapt_prompt = (
-        f"متن سناریوی زیر را برای خوانش نریشن فارسی با نشانگر مکث بازنویسی کن:\\n"
+        f"متن سناریوی زیر را هماهنگ با شات‌های ویدیو برای خوانش نریشن فارسی با نشانگر مکث بازنویسی کن:\\n"
         f"قلاب: {script['hook']}\\nبدنه: {script['body']}\\nپایان: {script['cta']}"
     )
     adapt_res = client.models.generate_content(
@@ -218,9 +297,9 @@ def voiceover_node(state: ContentStudioState) -> dict:
     }
 
 
-def checkpoint_2_voiceover_gate(state: ContentStudioState) -> dict:
+def checkpoint_4_voiceover_gate(state: ContentStudioState) -> dict:
     decision = interrupt({
-        "checkpoint": "checkpoint_2_voiceover",
+        "checkpoint": "checkpoint_4_voiceover",
         "stage": "voiceover",
         "data": state["voiceover"],
     })
@@ -233,77 +312,19 @@ def checkpoint_2_voiceover_gate(state: ContentStudioState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 3: Director / Decoupage Agent
+# Node 5: Final Editing, Mixing & Assembly
 # ---------------------------------------------------------------------------
-def director_node(state: ContentStudioState) -> dict:
-    client = get_gemini_client()
-    prompt = (
-        f"نریشن زیر را به شات‌های دقیق دکوپاژ عمودی ۹:۱۶ به فارسی تبدیل کن:\\n"
-        f"{state['voiceover']['narration_text']}"
-    )
-    res = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=DirectorOutput,
-        ),
-    )
+def assembly_node(state: ContentStudioState) -> dict:
     return {
-        "current_stage": "director",
-        "director": json.loads(res.text),
+        "current_stage": "assembly",
         "feedback": None,
     }
 
 
-def checkpoint_3_director_gate(state: ContentStudioState) -> dict:
+def checkpoint_5_assembly_gate(state: ContentStudioState) -> dict:
     decision = interrupt({
-        "checkpoint": "checkpoint_3_director",
-        "stage": "director",
-        "data": state["director"],
-    })
-    if decision.get("action") == "regenerate":
-        return {"next_action": "regenerate", "feedback": decision.get("feedback")}
-    return {
-        "next_action": "approve",
-        "director": decision.get("director", state["director"]),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Node 4: Visual Asset Producer Agent
-# ---------------------------------------------------------------------------
-def visual_producer_node(state: ContentStudioState) -> dict:
-    client = get_gemini_client()
-    shots = state["director"]["shots"]
-    assets = []
-    for shot in shots:
-        img_path = MEDIA_DIR / f"{state['project_id']}_shot_{shot['shot_number']}.png"
-        img_res = client.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=f"Vertical 9:16 cinematic storyboard frame: {shot['visual_prompt_fa']}",
-        )
-        for part in img_res.candidates[0].content.parts:
-            if part.inline_data and part.inline_data.data:
-                img_path.write_bytes(part.inline_data.data)
-                break
-        assets.append({
-            "shot_number": shot["shot_number"],
-            "image_path": str(img_path),
-            "motion_cue": shot["camera_movement"],
-            "status": "ready",
-        })
-    return {
-        "current_stage": "visuals",
-        "visuals": assets,
-        "feedback": None,
-    }
-
-
-def checkpoint_4_visuals_gate(state: ContentStudioState) -> dict:
-    decision = interrupt({
-        "checkpoint": "checkpoint_4_visuals",
-        "stage": "visuals",
+        "checkpoint": "checkpoint_5_assembly",
+        "stage": "assembly",
         "data": state["visuals"],
     })
     if decision.get("action") == "regenerate":
@@ -318,33 +339,40 @@ def build_studio_graph():
     builder = StateGraph(ContentStudioState)
     builder.add_node("research_and_script", research_and_script_node)
     builder.add_node("checkpoint_1_script_gate", checkpoint_1_script_gate)
+    builder.add_node("storyboard", storyboard_node)
+    builder.add_node("checkpoint_2_storyboard_gate", checkpoint_2_storyboard_gate)
+    builder.add_node("video_shots", video_shots_node)
+    builder.add_node("checkpoint_3_video_shots_gate", checkpoint_3_video_shots_gate)
     builder.add_node("voiceover", voiceover_node)
-    builder.add_node("checkpoint_2_voiceover_gate", checkpoint_2_voiceover_gate)
-    builder.add_node("director", director_node)
-    builder.add_node("checkpoint_3_director_gate", checkpoint_3_director_gate)
-    builder.add_node("visual_producer", visual_producer_node)
-    builder.add_node("checkpoint_4_visuals_gate", checkpoint_4_visuals_gate)
+    builder.add_node("checkpoint_4_voiceover_gate", checkpoint_4_voiceover_gate)
+    builder.add_node("assembly", assembly_node)
+    builder.add_node("checkpoint_5_assembly_gate", checkpoint_5_assembly_gate)
 
     builder.add_edge(START, "research_and_script")
     builder.add_edge("research_and_script", "checkpoint_1_script_gate")
     builder.add_conditional_edges(
         "checkpoint_1_script_gate",
-        lambda s: "research_and_script" if s.get("next_action") == "regenerate" else "voiceover",
+        lambda s: "research_and_script" if s.get("next_action") == "regenerate" else "storyboard",
     )
-    builder.add_edge("voiceover", "checkpoint_2_voiceover_gate")
+    builder.add_edge("storyboard", "checkpoint_2_storyboard_gate")
     builder.add_conditional_edges(
-        "checkpoint_2_voiceover_gate",
-        lambda s: "voiceover" if s.get("next_action") == "regenerate" else "director",
+        "checkpoint_2_storyboard_gate",
+        lambda s: "storyboard" if s.get("next_action") == "regenerate" else "video_shots",
     )
-    builder.add_edge("director", "checkpoint_3_director_gate")
+    builder.add_edge("video_shots", "checkpoint_3_video_shots_gate")
     builder.add_conditional_edges(
-        "checkpoint_3_director_gate",
-        lambda s: "director" if s.get("next_action") == "regenerate" else "visual_producer",
+        "checkpoint_3_video_shots_gate",
+        lambda s: "video_shots" if s.get("next_action") == "regenerate" else "voiceover",
     )
-    builder.add_edge("visual_producer", "checkpoint_4_visuals_gate")
+    builder.add_edge("voiceover", "checkpoint_4_voiceover_gate")
     builder.add_conditional_edges(
-        "checkpoint_4_visuals_gate",
-        lambda s: "visual_producer" if s.get("next_action") == "regenerate" else END,
+        "checkpoint_4_voiceover_gate",
+        lambda s: "voiceover" if s.get("next_action") == "regenerate" else "assembly",
+    )
+    builder.add_edge("assembly", "checkpoint_5_assembly_gate")
+    builder.add_conditional_edges(
+        "checkpoint_5_assembly_gate",
+        lambda s: "assembly" if s.get("next_action") == "regenerate" else END,
     )
     return builder.compile(checkpointer=checkpointer)
 `;
@@ -608,6 +636,8 @@ export function getWindowsBundlePreviews(): WindowsBundleFilePreview[] {
 }
 
 export async function generateWindowsBundleZip(): Promise<Buffer> {
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
   const zip = new JSZip();
   zip.file("README_WINDOWS.md", README_WINDOWS_MD);
   zip.file("setup_and_run.bat", SETUP_BAT);
@@ -621,6 +651,20 @@ export async function generateWindowsBundleZip(): Promise<Buffer> {
   zip.file("src-tauri/tauri.conf.json", TAURI_CONF_JSON);
   zip.file("src-tauri/build.rs", "fn main() {\n    tauri_build::build()\n}\n");
   zip.file("src-tauri/src/main.rs", MAIN_RS);
+
+  const extraFiles = [
+    "config.yaml",
+    "install_comfyui_models.ps1",
+    "install_comfyui_models.sh",
+    "server/video/workflows/wan22_5b_gguf_i2v_api.json",
+    "server/video/workflows/ltx23_fp8_i2v_api.json",
+  ];
+  for (const rel of extraFiles) {
+    const abs = pathMod.resolve(process.cwd(), rel);
+    if (fsMod.existsSync(abs)) {
+      zip.file(rel, fsMod.readFileSync(abs, "utf-8"));
+    }
+  }
 
   const arrayBuffer = await zip.generateAsync({ type: "nodebuffer" });
   return Buffer.from(arrayBuffer);

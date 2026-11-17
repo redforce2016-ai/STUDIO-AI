@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
 import {
@@ -50,7 +51,19 @@ import {
   updateAgentRoutes,
 } from "./server/router.js";
 import { generateWindowsBundleZip, getWindowsBundlePreviews } from "./server/windowsBundle.js";
+import {
+  WEB_STUDIO_CATALOG,
+  addOrUpdateBrowserProfile,
+  clearAgentBrowserState,
+  dispatchAgentBrowserCommand,
+  executeWebStudioShotGeneration,
+  getAgentBrowserState,
+  resetProfileDailyQuota,
+  switchActiveBrowserProfile,
+  updateWebStudioSiteConfig,
+} from "./server/agentBrowser.js";
 import type {
+  AgentBrowserCommandType,
   AgentRouteTarget,
   ImageAspectRatio,
   ImageResolution,
@@ -62,6 +75,10 @@ import type {
   VideoDurationOption,
   VideoResolutionOption,
   VoicePersona,
+  WebStudioGenerationMode,
+  WebStudioModelOption,
+  WebStudioSiteConfig,
+  WebStudioSiteId,
 } from "./src/types/studio.js";
 
 const ROUTER_PROVIDER_PRESETS: Array<{
@@ -136,9 +153,19 @@ const VALID_AGENTS: StudioAgentId[] = [
   "visuals",
 ];
 
+function resolveServerPort(): number {
+  const portFlagIndex = process.argv.indexOf("--port");
+  if (portFlagIndex !== -1 && process.argv[portFlagIndex + 1]) {
+    const cliPort = Number(process.argv[portFlagIndex + 1]);
+    if (Number.isFinite(cliPort) && cliPort > 0) return cliPort;
+  }
+  return 3000;
+}
+
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT || 3000);
+  const httpServer = http.createServer(app);
+  const PORT = resolveServerPort();
 
   app.use(express.json({ limit: "50mb" }));
 
@@ -388,7 +415,8 @@ async function startServer() {
         voiceName ?? project.voiceover?.voiceName ?? "Kore",
         voiceStyle ?? project.voiceover?.voiceStyle,
         feedback,
-        narrationText
+        narrationText,
+        project.director
       );
       const updated = saveProject({
         ...project,
@@ -462,6 +490,32 @@ async function startServer() {
   // ============================================================================
   app.get("/api/video/preflight", (_req, res) => {
     res.json({ preflight: runPreflightCheck() });
+  });
+
+  app.get("/api/video/hardware", async (_req, res) => {
+    const { detectHardwareAndWriteConfig, getModelInstallInstructions } = await import(
+      "./server/video/hardware.js"
+    );
+    const report = await detectHardwareAndWriteConfig();
+    res.json({
+      hardware: report.hardware,
+      configPath: report.configPath,
+      installInstructions: getModelInstallInstructions(report.hardware.selectedProfile),
+    });
+  });
+
+  app.post("/api/video/models/setup", async (req, res) => {
+    try {
+      const { runConfirmedModelSetup } = await import("./server/video/modelInstaller.js");
+      const { targetProfile } = (req.body || {}) as {
+        targetProfile?: "wan_2_2_5b_gguf" | "wan_2_2_or_ltx_2_3_fp8" | "parallax_only";
+      };
+      const report = await runConfirmedModelSetup({ targetProfile });
+      res.json({ report });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در آماده‌سازی مدل‌های محلی";
+      res.status(500).json({ error: msg });
+    }
   });
 
   app.get("/api/video/runs/:runId/srt", (req, res) => {
@@ -687,7 +741,7 @@ async function startServer() {
     }
   });
 
-  // Generate Video from Text or Animate Image (gemini-omni-1.2-flash via Interactions API)
+  // Animate Keyframe Locally (ComfyUIProvider + ParallaxVideoProvider fallback; Text-to-Video forbidden)
   app.post("/api/studio/video", async (req, res) => {
     try {
       const { prompt, aspectRatio, duration, resolution, imageBase64, mimeType, title } = req.body as {
@@ -700,7 +754,13 @@ async function startServer() {
         title?: string;
       };
       if (!prompt?.trim()) {
-        return res.status(400).json({ error: "توضیح صحنه یا حرکت دوربین برای ساخت ویدیو الزامی است." });
+        return res.status(400).json({ error: "توضیح حرکت آرام دوربین برای متحرک‌سازی تصویر کلیدی الزامی است." });
+      }
+      if (!imageBase64?.trim()) {
+        return res.status(400).json({
+          error:
+            "قانون کیفیت شماره ۴: تولید ویدیو از متن (Text-to-Video) ممنوع است. لطفاً یک تصویر کلیدی (Keyframe) بارگذاری کنید.",
+        });
       }
       const result = await runStudioVideoAgent({
         prompt: prompt.trim(),
@@ -718,8 +778,8 @@ async function startServer() {
         prompt: prompt.trim(),
         mediaUrl: result.videoUrl,
         aspectRatio: aspectRatio || "16:9",
-        modelUsed: "gemini-omni-1.2-flash",
-        notes: imageBase64 ? "متحرک‌سازی تصویر به ویدیو" : "تولید ویدیو از متن",
+        modelUsed: result.providerUsed === "comfyui" ? "ComfyUI Local (Wan 2.2 / LTX-2.3)" : "Local Parallax 2.5D Depth",
+        notes: `متحرک‌سازی محلی Keyframe (${result.providerUsed}) · زمان: ${result.renderDurationMs}ms · تلاش: ${result.attempts}`,
         createdAt: new Date().toISOString(),
       };
       saveStudioAsset(asset);
@@ -780,6 +840,150 @@ async function startServer() {
       const msg = formatGeminiError(err);
       res.status(500).json({ error: msg });
     }
+  });
+
+  // ============================================================================
+  // Playwright Stealth Chromium + LangGraph Multi-Account Agent Browser API
+  // ============================================================================
+  app.get("/api/browser/state", (_req, res) => {
+    res.json({
+      browser: getAgentBrowserState(),
+      catalog: WEB_STUDIO_CATALOG,
+    });
+  });
+
+  app.post("/api/browser/command", async (req, res) => {
+    try {
+      const { command, target, agentName } = (req.body || {}) as {
+        command?: AgentBrowserCommandType;
+        target?: string;
+        agentName?: string;
+      };
+      if (!command) {
+        return res.status(400).json({ error: "نوع دستور مرورگر (command) الزامی است." });
+      }
+      if (
+        (command === "search" ||
+          command === "goto" ||
+          command === "click" ||
+          command === "fill" ||
+          command === "select" ||
+          command === "mission") &&
+        !target?.trim()
+      ) {
+        return res.status(400).json({ error: "مقدار هدف یا عبارت دستور (target) الزامی است." });
+      }
+      const state = await dispatchAgentBrowserCommand({
+        command,
+        target: target || "",
+        agentName,
+      });
+      res.json({ browser: state });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در اجرای دستور مرورگر ایجنت";
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.post("/api/browser/profiles", (req, res) => {
+    try {
+      const { id, name, email, password, dailyLimit, connectedSites, notesFa } = (req.body || {}) as {
+        id?: string;
+        name?: string;
+        email?: string;
+        password?: string;
+        dailyLimit?: number;
+        connectedSites?: WebStudioSiteId[];
+        notesFa?: string;
+      };
+      if (!email?.trim()) {
+        return res.status(400).json({ error: "ایمیل اکانت گوگل الزامی است." });
+      }
+      const browser = addOrUpdateBrowserProfile({
+        id,
+        name: name?.trim() || email.trim(),
+        email: email.trim(),
+        password: password?.trim(),
+        dailyLimit,
+        connectedSites,
+        notesFa,
+      });
+      res.json({ browser });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در ثبت پروفایل گوگل";
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post("/api/browser/profiles/:id/switch", (req, res) => {
+    const browser = switchActiveBrowserProfile(
+      req.params.id,
+      "سوییچ دستی پروفایل گوگل توسط کاربر"
+    );
+    res.json({ browser });
+  });
+
+  app.post("/api/browser/profiles/reset-quota", (req, res) => {
+    const { profileId } = (req.body || {}) as { profileId?: string };
+    const browser = resetProfileDailyQuota(profileId);
+    res.json({ browser });
+  });
+
+  app.put("/api/browser/site-config", (req, res) => {
+    const patch = (req.body || {}) as Partial<WebStudioSiteConfig>;
+    const browser = updateWebStudioSiteConfig(patch);
+    res.json({ browser });
+  });
+
+  app.post("/api/browser/studio/generate-shot", async (req, res) => {
+    try {
+      const {
+        rawPrompt,
+        projectId,
+        shotNumber,
+        siteId,
+        mode,
+        modelId,
+        aspectRatio,
+        resolution,
+      } = (req.body || {}) as {
+        rawPrompt?: string;
+        projectId?: string | null;
+        shotNumber?: number | null;
+        siteId?: WebStudioSiteId;
+        mode?: WebStudioGenerationMode;
+        modelId?: WebStudioModelOption;
+        aspectRatio?: "9:16" | "16:9" | "1:1";
+        resolution?: "720p" | "1080p";
+      };
+      if (!rawPrompt?.trim()) {
+        return res.status(400).json({
+          error: "پرامپت شات برای نهایی‌سازی و ارسال به وب‌سایت الزامی است.",
+        });
+      }
+      const result = await executeWebStudioShotGeneration({
+        rawPrompt: rawPrompt.trim(),
+        projectId,
+        shotNumber,
+        siteId,
+        mode,
+        modelId,
+        aspectRatio,
+        resolution,
+      });
+      res.json({
+        job: result.job,
+        browser: result.browserState,
+        project: projectId ? getProject(projectId) : null,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در تولید شات با مرورگر ایجنت";
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  app.post("/api/browser/clear", (_req, res) => {
+    res.json({ browser: clearAgentBrowserState() });
   });
 
   // ============================================================================
@@ -977,7 +1181,11 @@ async function startServer() {
   // Vite middleware in development, static dist in production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === "true" ? false : undefined,
+        ws: { server: httpServer },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -989,7 +1197,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Content Studio Desktop server listening on http://localhost:${PORT}`);
     // Pre-warm headless Chromium once at startup without race conditions
     void ensureRemotionBrowser().catch((err) => {

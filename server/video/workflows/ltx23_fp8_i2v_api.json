@@ -1,0 +1,105 @@
+{
+  "1": {
+    "inputs": {
+      "image": "{{IMAGE_FILENAME}}",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Keyframe Image (I2V Only)"
+    }
+  },
+  "2": {
+    "inputs": {
+      "ckpt_name": "ltx-video-2b-v0.9.5-fp8.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load LTX-2.3 / Wan 2.2 FP8 Checkpoint (16GB+ VRAM Profile)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "text": "{{MOTION_PROMPT}}",
+      "clip": ["2", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive Gentle Motion Prompt"
+    }
+  },
+  "4": {
+    "inputs": {
+      "text": "{{NEGATIVE_PROMPT}}",
+      "clip": ["2", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "5": {
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "vae": ["2", 2],
+      "image": ["1", 0],
+      "width": "{{WIDTH}}",
+      "height": "{{HEIGHT}}",
+      "length": "{{FRAME_COUNT}}",
+      "batch_size": 1,
+      "img_compression": 32
+    },
+    "class_type": "LTXVImgToVideo",
+    "_meta": {
+      "title": "LTX-V Image-to-Video Latent Conditioning"
+    }
+  },
+  "6": {
+    "inputs": {
+      "seed": "{{SEED}}",
+      "steps": 24,
+      "cfg": 3.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["2", 0],
+      "positive": ["5", 0],
+      "negative": ["5", 1],
+      "latent_image": ["5", 2]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "7": {
+    "inputs": {
+      "samples": ["6", 0],
+      "vae": ["2", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode Frames"
+    }
+  },
+  "8": {
+    "inputs": {
+      "frame_rate": "{{FPS}}",
+      "loop_count": 0,
+      "filename_prefix": "LTX23_FP8_I2V_Shot",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 18,
+      "save_metadata": true,
+      "trim_silence": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": ["7", 0]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine (MP4 Output)"
+    }
+  }
+}
