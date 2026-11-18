@@ -1,28 +1,30 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import {
   AlertTriangle,
   CheckCircle2,
   Clock,
   ExternalLink,
-  Globe,
   PauseCircle,
   Plus,
   Sparkles,
+  Zap,
 } from "lucide-react";
-import { AgentBrowserDrawer } from "./components/AgentBrowserDrawer";
 import {
   FORMATS_BY_PLATFORM,
   GuidedStudioChat,
   type ChatTimelineMessage,
 } from "./components/GuidedStudioChat";
-import { ProjectsAndDesktopView } from "./components/ProjectsAndDesktopView";
+import { PageProfilesView } from "./components/PageProfilesView";
 import { RouterSettingsView } from "./components/RouterSettingsView";
-import { StageAssembly } from "./components/StageAssembly";
+import { StageDaVinciResolve } from "./components/StageDaVinciResolve";
+import { StageDirector } from "./components/StageDirector";
+import { StageNarration } from "./components/StageNarration";
 import { StageResearchScript } from "./components/StageResearchScript";
-import { StageStoryboard } from "./components/StageStoryboard";
-import { StageVideoShots } from "./components/StageVideoShots";
+import { StageShotVideos } from "./components/StageShotVideos";
 import { StageVoiceover } from "./components/StageVoiceover";
+import { VaultSecondBrainView } from "./components/VaultSecondBrainView";
+import { ViralCompetitorRadarView } from "./components/ViralCompetitorRadarView";
 import {
   deleteProjectFromFirestore,
   signInWithGoogle,
@@ -33,45 +35,50 @@ import {
   type CloudProjectSummary,
 } from "./lib/firebase";
 import type {
-  AgentBrowserCommandType,
-  AgentBrowserState,
   ContentFormatOption,
   DirectorOutput,
+  LocalVideoEngineId,
+  NarrationScriptOutput,
   PageMaturityOption,
+  PageProfile,
   PipelineStage,
   PlatformOption,
   ProjectBrief,
   ProjectRecord,
   ResearchAndScriptOutput,
+  ShotVideoApprovalStatus,
   TopicAnalysisResponse,
   ViralTopicProposal,
   VoicePersona,
   VoiceoverOutput,
-  WebStudioGenerationMode,
-  WebStudioModelOption,
-  WebStudioSiteConfig,
-  WebStudioSiteId,
 } from "./types/studio";
-import type { VideoAspectFormat, VideoQualityMode } from "./types/videoPipeline";
 
-type AppTab = "workspace" | "projects" | "router";
+type AppTab = "workspace" | "pages" | "viral" | "vault" | "router";
 
-const STEP_ITEMS: Array<{ stage: PipelineStage; num: string; label: string }> = [
-  { stage: "research_script", num: "۱", label: "سناریو" },
-  { stage: "storyboard", num: "۲", label: "استوری‌بورد" },
-  { stage: "video_shots", num: "۳", label: "ساخت شات‌های ویدیو" },
-  { stage: "voiceover", num: "۴", label: "ساخت صدا" },
-  { stage: "assembly", num: "۵", label: "تدوین و مونتاژ نهایی" },
+const STEP_ITEMS: Array<{
+  stage: PipelineStage;
+  num: string;
+  label: string;
+  agentLabel: string;
+}> = [
+  { stage: "research_script", num: "۱", label: "سناریو", agentLabel: "ایجنت ۱" },
+  { stage: "narration", num: "۲", label: "متن گویندگی", agentLabel: "ایجنت ۱" },
+  { stage: "director", num: "۳", label: "دکوپاژ و ۲ فریم", agentLabel: "ایجنت ۲" },
+  { stage: "shot_videos", num: "۴", label: "ویدیوی شات‌ها", agentLabel: "ایجنت ۲" },
+  { stage: "voiceover", num: "۵", label: "کلون صدا", agentLabel: "ایجنت ۲" },
+  { stage: "davinci", num: "۶", label: "تدوین DaVinci", agentLabel: "ایجنت ۲" },
 ];
 
 const STAGE_RANK: Record<PipelineStage, number> = {
   input: 0,
   research_script: 1,
-  storyboard: 2,
-  video_shots: 3,
-  voiceover: 4,
-  assembly: 5,
-  completed: 6,
+  narration: 2,
+  director: 3,
+  shot_videos: 4,
+  voiceover: 5,
+  davinci: 6,
+  visuals: 6,
+  completed: 7,
 };
 
 const PLATFORM_NAMES: Record<string, string> = {
@@ -92,14 +99,22 @@ const FORMAT_NAMES: Record<string, string> = {
   carousel: "اسلاید",
 };
 
+function resolveStageToView(stage: PipelineStage): PipelineStage {
+  if (stage === "completed" || stage === "visuals") return "davinci";
+  return stage;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("workspace");
+  const [pages, setPages] = useState<PageProfile[]>([]);
+  const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [viewingStage, setViewingStage] = useState<PipelineStage>("input");
   const [isRunning, setIsRunning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const initializedRef = useRef(false);
 
   // Firebase Auth & Cloud state
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
@@ -115,188 +130,7 @@ export default function App() {
   const [pendingBrief, setPendingBrief] = useState<ProjectBrief | null>(null);
   const [pendingAnalysis, setPendingAnalysis] = useState<TopicAnalysisResponse | null>(null);
 
-  // Hidden Agent Browser & Slide-Over Inspector Drawer state
-  const [isBrowserDrawerOpen, setIsBrowserDrawerOpen] = useState(false);
-  const [browserState, setBrowserState] = useState<AgentBrowserState | null>(null);
-  const [isExecutingBrowserCmd, setIsExecutingBrowserCmd] = useState(false);
-
   const activeProject = projects.find((p) => p.id === selectedProjectId) ?? null;
-
-  const fetchBrowserState = useCallback(async () => {
-    try {
-      const res = await fetch("/api/browser/state");
-      if (!res.ok) return;
-      const data = (await res.json()) as { browser?: AgentBrowserState };
-      if (data.browser) {
-        setBrowserState(data.browser);
-      }
-    } catch {
-      // Ignore transient poll errors
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchBrowserState();
-  }, [fetchBrowserState]);
-
-  useEffect(() => {
-    if (!isBrowserDrawerOpen && !isAnalyzing && !isRunning) return;
-    const timer = setInterval(() => {
-      void fetchBrowserState();
-    }, 1800);
-    return () => clearInterval(timer);
-  }, [isBrowserDrawerOpen, isAnalyzing, isRunning, fetchBrowserState]);
-
-  const handleDispatchBrowserCommand = useCallback(
-    async (command: AgentBrowserCommandType, target: string, agentName?: string) => {
-      setIsExecutingBrowserCmd(true);
-      try {
-        const res = await fetch("/api/browser/command", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command, target, agentName }),
-        });
-        const data = (await res.json()) as { browser?: AgentBrowserState; error?: string };
-        if (!res.ok) {
-          throw new Error(data.error || "خطا در اجرای دستور مرورگر ایجنت");
-        }
-        if (data.browser) {
-          setBrowserState(data.browser);
-        }
-      } catch (err) {
-        setErrorBanner(
-          err instanceof Error ? err.message : "خطا در ارتباط با مرورگر مخفی ایجنت"
-        );
-      } finally {
-        setIsExecutingBrowserCmd(false);
-      }
-    },
-    []
-  );
-
-  const handleClearBrowserState = useCallback(async () => {
-    setIsExecutingBrowserCmd(true);
-    try {
-      const res = await fetch("/api/browser/clear", { method: "POST" });
-      const data = (await res.json()) as { browser?: AgentBrowserState };
-      if (data.browser) {
-        setBrowserState(data.browser);
-      }
-    } finally {
-      setIsExecutingBrowserCmd(false);
-    }
-  }, []);
-
-  const handleAddBrowserProfile = useCallback(
-    async (input: { name: string; email: string; password?: string; dailyLimit: number }) => {
-      setIsExecutingBrowserCmd(true);
-      try {
-        const res = await fetch("/api/browser/profiles", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(input),
-        });
-        const data = (await res.json()) as { browser?: AgentBrowserState; error?: string };
-        if (!res.ok) throw new Error(data.error || "خطا در افزودن پروفایل گوگل");
-        if (data.browser) setBrowserState(data.browser);
-      } catch (err) {
-        setErrorBanner(err instanceof Error ? err.message : "خطا در ثبت پروفایل گوگل");
-      } finally {
-        setIsExecutingBrowserCmd(false);
-      }
-    },
-    []
-  );
-
-  const handleSwitchBrowserProfile = useCallback(async (profileId: string) => {
-    setIsExecutingBrowserCmd(true);
-    try {
-      const res = await fetch(`/api/browser/profiles/${profileId}/switch`, {
-        method: "POST",
-      });
-      const data = (await res.json()) as { browser?: AgentBrowserState };
-      if (data.browser) setBrowserState(data.browser);
-    } finally {
-      setIsExecutingBrowserCmd(false);
-    }
-  }, []);
-
-  const handleResetBrowserQuota = useCallback(async (profileId?: string) => {
-    setIsExecutingBrowserCmd(true);
-    try {
-      const res = await fetch("/api/browser/profiles/reset-quota", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profileId }),
-      });
-      const data = (await res.json()) as { browser?: AgentBrowserState };
-      if (data.browser) setBrowserState(data.browser);
-    } finally {
-      setIsExecutingBrowserCmd(false);
-    }
-  }, []);
-
-  const handleUpdateBrowserSiteConfig = useCallback(
-    async (patch: Partial<WebStudioSiteConfig>) => {
-      try {
-        const res = await fetch("/api/browser/site-config", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(patch),
-        });
-        const data = (await res.json()) as { browser?: AgentBrowserState };
-        if (data.browser) setBrowserState(data.browser);
-      } catch {
-        // ignore
-      }
-    },
-    []
-  );
-
-  const handleGenerateBrowserStudioShot = useCallback(
-    async (params: {
-      rawPrompt: string;
-      projectId?: string | null;
-      shotNumber?: number | null;
-      siteId: WebStudioSiteId;
-      mode: WebStudioGenerationMode;
-      modelId: WebStudioModelOption;
-      aspectRatio: "9:16" | "16:9" | "1:1";
-      resolution: "720p" | "1080p";
-    }) => {
-      setIsExecutingBrowserCmd(true);
-      try {
-        const res = await fetch("/api/browser/studio/generate-shot", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(params),
-        });
-        const data = (await res.json()) as {
-          browser?: AgentBrowserState;
-          project?: ProjectRecord | null;
-          error?: string;
-        };
-        if (!res.ok) {
-          throw new Error(data.error || "خطا در ساخت شات با مرورگر ایجنت");
-        }
-        if (data.browser) {
-          setBrowserState(data.browser);
-        }
-        if (data.project) {
-          setProjects((prev) =>
-            prev.map((p) => (p.id === data.project!.id ? data.project! : p))
-          );
-        }
-      } catch (err) {
-        setErrorBanner(
-          err instanceof Error ? err.message : "خطا در اجرای رندر شات در مرورگر ایجنت"
-        );
-      } finally {
-        setIsExecutingBrowserCmd(false);
-      }
-    },
-    []
-  );
 
   useEffect(() => {
     const unsub = subscribeAuthState((user) => {
@@ -343,7 +177,9 @@ export default function App() {
         }
       }
     } catch (err) {
-      setErrorBanner(err instanceof Error ? `ورود با گوگل ناموفق بود: ${err.message}` : "خطا در ورود گوگل");
+      setErrorBanner(
+        err instanceof Error ? `ورود با گوگل ناموفق بود: ${err.message}` : "خطا در ورود گوگل"
+      );
     }
   };
 
@@ -351,29 +187,74 @@ export default function App() {
     await signOutUser();
   };
 
-  const loadProjects = useCallback(async () => {
-    try {
-      const res = await fetch("/api/projects");
-      const data = await res.json();
-      const list = (data.projects ?? []) as ProjectRecord[];
-      setProjects(list);
-    } catch {
-      setErrorBanner("بارگذاری پروژه‌ها با خطا مواجه شد.");
+  const applyPageProfileToComposer = useCallback((page: PageProfile | null) => {
+    if (!page) {
+      setSelectedPageId(null);
+      return;
     }
+    setSelectedPageId(page.id);
+    setPlatform(page.platform);
+    setContentFormat(page.defaultFormat);
+    setPageMaturity(page.pageMaturity);
   }, []);
 
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+  const loadStudioInitialData = useCallback(async () => {
+    try {
+      const [pagesRes, projectsRes] = await Promise.all([
+        fetch("/api/pages"),
+        fetch("/api/projects"),
+      ]);
+      const pagesData = await pagesRes.json();
+      const projectsData = await projectsRes.json();
 
-  const upsertProject = (proj: ProjectRecord) => {
+      const pageList = (pagesData.pages ?? []) as PageProfile[];
+      const projectList = (projectsData.projects ?? []) as ProjectRecord[];
+
+      setPages(pageList);
+      setProjects(projectList);
+
+      if (!initializedRef.current) {
+        initializedRef.current = true;
+        if (pageList[0]) {
+          applyPageProfileToComposer(pageList[0]);
+        }
+        if (projectList[0]) {
+          const first = projectList[0];
+          setSelectedProjectId(first.id);
+          setViewingStage(resolveStageToView(first.currentStage));
+          if (first.brief.pageProfileId) {
+            const matchedPage = pageList.find((pg) => pg.id === first.brief.pageProfileId);
+            if (matchedPage) applyPageProfileToComposer(matchedPage);
+          }
+          setChatMessages([
+            {
+              id: `seed_open_${first.id}`,
+              role: "assistant",
+              metaLabel: "پروژه نمونه آماده بررسی در ۶ مرحله",
+              text: `پست «${first.brief.title}» باز است. می‌توانید مراحل ۱ تا ۶ (سناریو، متن اعراب‌گذاری‌شده، شات‌های ۳ تا ۸ ثانیه با ۲ فریم، تایید تک‌به‌تک ویدیوی شات‌ها، کلون صدا و خروجی DaVinci Resolve) را در سمت چپ ببینید یا با دکمه «پست جدید» در بالا موضوع تازه‌ای شروع کنید.`,
+            },
+          ]);
+        }
+      }
+    } catch {
+      setErrorBanner("بارگذاری اطلاعات استودیو با خطا مواجه شد.");
+    }
+  }, [applyPageProfileToComposer]);
+
+  useEffect(() => {
+    void loadStudioInitialData();
+  }, [loadStudioInitialData]);
+
+  const upsertProject = (proj: ProjectRecord, switchStage = true) => {
     setProjects((prev) => {
       const exists = prev.some((p) => p.id === proj.id);
       if (exists) return prev.map((p) => (p.id === proj.id ? proj : p));
       return [proj, ...prev];
     });
     setSelectedProjectId(proj.id);
-    setViewingStage(proj.currentStage === "completed" ? "assembly" : proj.currentStage);
+    if (switchStage) {
+      setViewingStage(resolveStageToView(proj.currentStage));
+    }
   };
 
   const handleStartNewProject = () => {
@@ -389,7 +270,11 @@ export default function App() {
 
   const handleOpenProject = (proj: ProjectRecord) => {
     setSelectedProjectId(proj.id);
-    setViewingStage(proj.currentStage === "completed" ? "assembly" : proj.currentStage);
+    setViewingStage(resolveStageToView(proj.currentStage));
+    if (proj.brief.pageProfileId) {
+      const pg = pages.find((item) => item.id === proj.brief.pageProfileId);
+      if (pg) applyPageProfileToComposer(pg);
+    }
     setPendingBrief(null);
     setPendingAnalysis(null);
     setChatMessages([
@@ -399,7 +284,7 @@ export default function App() {
         metaLabel: `${PLATFORM_NAMES[proj.brief.platform] || "پروژه"} · ${
           proj.brief.contentFormat ? FORMAT_NAMES[proj.brief.contentFormat] || "" : ""
         }`,
-        text: `پروژه «${proj.brief.title}» باز شد. هر تغییری در مرحله فعلی خواستید، همین‌جا بنویسید.`,
+        text: `پروژه «${proj.brief.title}» باز شد. هر اصلاحی در مرحله فعلی خواستید بنویسید تا ایجنت اعمال کند و به حافظه بلندمدت بسپارد.`,
       },
     ]);
     setActiveTab("workspace");
@@ -421,28 +306,31 @@ export default function App() {
     }
   };
 
-  // Step 1 from Right Chat Box: Analyze idea from 3 perspectives & propose 3 viral topics
+  // Step 0: Propose 3 deeply analyzed viral options tailored to the active Page Profile
   const handleAnalyzeIdea = async (ideaText: string) => {
     setIsAnalyzing(true);
     setErrorBanner(null);
 
+    const activePage = pages.find((p) => p.id === selectedPageId) ?? null;
     const maturityLabel =
       pageMaturity === "new_page" ? "شروع پیج (پست‌های ۱ تا ۵)" : "پیج فعال (۱۰ تا ۲۰+ پست)";
 
     const brief: ProjectBrief = {
-      title: ideaText.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) || "ایده جدید",
+      title: ideaText.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) || "پست تخصصی جدید",
       idea: ideaText,
+      pageProfileId: selectedPageId,
       platform,
       contentFormat,
       pageMaturity,
-      tone: "educational",
-      targetDurationSeconds: contentFormat === "story" ? 20 : contentFormat === "long_video" ? 240 : 45,
+      tone: activePage?.brandTone || "educational",
+      targetDurationSeconds:
+        contentFormat === "story" ? 20 : contentFormat === "long_video" ? 180 : 35,
     };
 
     const userMsg: ChatTimelineMessage = {
       id: `u_${Date.now()}`,
       role: "user",
-      metaLabel: `${PLATFORM_NAMES[platform] || platform} · ${FORMAT_NAMES[contentFormat] || contentFormat} · ${maturityLabel}`,
+      metaLabel: `${activePage ? `${activePage.name} · ` : ""}${PLATFORM_NAMES[platform] || platform} · ${FORMAT_NAMES[contentFormat] || contentFormat} · ${maturityLabel}`,
       text: ideaText,
     };
     setChatMessages((prev) => [...prev, userMsg]);
@@ -456,7 +344,7 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || "بررسی ایده با خطا مواجه شد.");
+        throw new Error(data.error || "بررسی موضوع با خطا مواجه شد.");
       }
       const analysis = data.analysis as TopicAnalysisResponse;
       setPendingAnalysis(analysis);
@@ -464,19 +352,19 @@ export default function App() {
       const assistantMsg: ChatTimelineMessage = {
         id: `a_${Date.now()}`,
         role: "assistant",
-        metaLabel: "تحلیل تخصصی ایجنت سناریونویس (استراتژی، پژوهش و روانشناسی)",
+        metaLabel: "ابر-ایجنت ۱ (پژوهشگر، استراتژیست و روانشناس سوشال مدیا)",
         text: analysis.strategistSummary,
         analysis,
       };
       setChatMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "خطا در تحلیل ایده");
+      setErrorBanner(err instanceof Error ? err.message : "خطا در تحلیل موضوع");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  // Step 2 from Right Chat Box: User selects 1 of 3 viral topics (or null for exact brief) -> runs Stage 1
+  // User picks 1 of 3 viral angles -> runs Stage 1 (Scenario)
   const handleSelectProposalAndStart = async (proposal: ViralTopicProposal | null) => {
     if (!pendingBrief) return;
     setIsRunning(true);
@@ -484,7 +372,7 @@ export default function App() {
 
     const chosenTone = proposal
       ? proposal.recommendedTone
-      : pendingAnalysis?.defaultRecommendedTone || "educational";
+      : pendingAnalysis?.defaultRecommendedTone || pendingBrief.tone;
     const chosenToneLabel = proposal
       ? proposal.recommendedToneLabelFa
       : pendingAnalysis?.defaultRecommendedToneLabelFa;
@@ -501,14 +389,16 @@ export default function App() {
       selectedTopicAngle: proposal,
     };
 
-    const choiceMsg: ChatTimelineMessage = {
-      id: `u_pick_${Date.now()}`,
-      role: "user",
-      text: proposal
-        ? `موضوع انتخابی من: «${proposal.title}»`
-        : "سناریو را دقیقاً بر اساس متن و توضیحات خودم بنویس.",
-    };
-    setChatMessages((prev) => [...prev, choiceMsg]);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `u_pick_${Date.now()}`,
+        role: "user",
+        text: proposal
+          ? `انتخاب من: «${proposal.title}»`
+          : "سناریو را دقیقاً بر اساس موضوع خام خودم بنویس.",
+      },
+    ]);
 
     try {
       const res = await fetch("/api/projects/start", {
@@ -530,12 +420,114 @@ export default function App() {
         {
           id: `a_ready_${Date.now()}`,
           role: "assistant",
-          text: "سناریو و نکات کلیدی در کادر سمت چپ آماده شد! می‌توانید متنش را مستقیماً ویرایش کنید، تغییر جدیدی همین‌جا بنویسید، یا تایید کنید تا صدای گوینده ساخته شود.",
+          text: "مرحله ۱ (سناریوی کامل و چک‌لیست الگوریتم) آماده شد! بررسی کنید و در صورت رضایت تایید کنید تا متن اعراب‌گذاری‌شده گویندگی ساخته شود.",
         },
       ]);
       void syncProjectIfSignedIn(data.project);
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : "خطا در شروع پروژه");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // Autonomous Autopilot: start directly from chosen angle to complete Stage 1-6 + Master MP4
+  const handleStartAutopilot = async (proposal: ViralTopicProposal | null) => {
+    if (!pendingBrief) return;
+    setIsRunning(true);
+    setErrorBanner(null);
+
+    const chosenTone = proposal
+      ? proposal.recommendedTone
+      : pendingAnalysis?.defaultRecommendedTone || pendingBrief.tone;
+    const chosenToneLabel = proposal
+      ? proposal.recommendedToneLabelFa
+      : pendingAnalysis?.defaultRecommendedToneLabelFa;
+    const chosenDuration = proposal
+      ? proposal.recommendedDurationSeconds
+      : pendingAnalysis?.defaultRecommendedDurationSeconds || pendingBrief.targetDurationSeconds;
+
+    const finalBrief: ProjectBrief = {
+      ...pendingBrief,
+      title: proposal ? proposal.title : pendingBrief.title,
+      tone: chosenTone,
+      toneLabelFa: chosenToneLabel,
+      targetDurationSeconds: chosenDuration,
+      selectedTopicAngle: proposal,
+      preferredVideoEngine: "hyperframes_html",
+      autonomousMode: true,
+    };
+
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `u_auto_${Date.now()}`,
+        role: "user",
+        text: `اجرای خودکار کامل (Autopilot) روی: «${finalBrief.title}»`,
+      },
+    ]);
+
+    try {
+      const res = await fetch("/api/projects/start-autopilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(finalBrief),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.project) upsertProject(data.project);
+        throw new Error(data.error || "اجرای خودکار پایپ‌لاین با خطا مواجه شد.");
+      }
+      upsertProject(data.project);
+      setPendingBrief(null);
+      setPendingAnalysis(null);
+      setDraftIdea("");
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `a_auto_done_${Date.now()}`,
+          role: "assistant",
+          text: "تولید خودکار مراحل ۱ تا ۶ به همراه بازبینی بینایی و مونتاژ MP4 نهایی تکمیل شد!",
+        },
+      ]);
+      void syncProjectIfSignedIn(data.project);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در اجرای خودکار پروژه");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  // Run Autopilot on an existing active project to finish all remaining stages to Stage 6
+  const handleRunProjectAutopilot = async () => {
+    if (!activeProject) return;
+    setIsRunning(true);
+    setErrorBanner(null);
+    try {
+      const res = await fetch(`/api/projects/${activeProject.id}/autopilot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preferredVideoEngine: activeProject.brief.preferredVideoEngine || "hyperframes_html",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.project) upsertProject(data.project);
+        throw new Error(data.error || "تکمیل خودکار پروژه ناموفق بود.");
+      }
+      upsertProject(data.project);
+      void syncProjectIfSignedIn(data.project);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `a_auto_cont_${Date.now()}`,
+          role: "assistant",
+          text: "تمام مراحل باقی‌مانده به صورت خودکار اجرا، بازبینی و در مرحله ۶ نهایی شدند.",
+        },
+      ]);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در تکمیل خودکار پروژه");
     } finally {
       setIsRunning(false);
     }
@@ -563,6 +555,7 @@ export default function App() {
     action: "approve" | "regenerate";
     feedback?: string;
     researchScript?: ResearchAndScriptOutput;
+    narration?: NarrationScriptOutput;
     voiceover?: VoiceoverOutput;
     director?: DirectorOutput;
   }) => {
@@ -578,36 +571,41 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) {
         if (data.project) upsertProject(data.project);
-        throw new Error(data.error || "ادامه پردازش با خطا مواجه شد.");
+        throw new Error(data.error || "ادامه پایپ‌لاین با خطا مواجه شد.");
       }
       const nextProj = data.project as ProjectRecord;
       upsertProject(nextProj);
       void syncProjectIfSignedIn(nextProj);
 
       if (payload.action === "approve") {
-        const nextStageMsg =
-          nextProj.currentStage === "storyboard"
-            ? "استوری‌بورد و دکوپاژ شات‌ها همراه با تصاویر کلیدی آماده شد. بررسی و تایید کنید."
-            : nextProj.currentStage === "video_shots"
-              ? "وارد مرحله ساخت شات‌های ویدیو و چیدمان سه‌بعدی شدید. هر شات را تولید و تایید کنید."
-              : nextProj.currentStage === "voiceover"
-                ? "متن و فایل صدای گوینده متناسب با زمان شات‌ها آماده شد. گوش دهید و تایید کنید."
-                : nextProj.currentStage === "assembly"
-                  ? "وارد میز تدوین، میکس و مونتاژ نهایی شدید. خروجی MP4 را رندر و نهایی کنید."
-                  : "تبریک! پروژه شما با موفقیت کامل تدوین و نهایی شد.";
-        setChatMessages((prev) => [
-          ...prev,
-          { id: `a_adv_${Date.now()}`, role: "assistant", text: nextStageMsg },
-        ]);
+        const msgByStage: Partial<Record<PipelineStage, string>> = {
+          narration:
+            "مرحله ۲ (متن گویندگی با اعراب‌گذاری دقیق فارسی و راهنمای فن بیان) آماده بررسی شماست.",
+          director:
+            "مرحله ۳ (دکوپاژ شات‌های ۳ تا ۸ ثانیه‌ای + ۲ فریم پیش‌نمایش برای هر شات) آماده شد.",
+          shot_videos:
+            "مرحله ۴ فعال شد: هر شات را رندر کنید، ببینید و تک‌به‌تک تایید کنید تا شات بعدی باز شود.",
+          voiceover:
+            "مرحله ۵ (تولید صدای گوینده با رعایت اعراب و لحن پروفایل پیج) آماده شنیدن است.",
+          davinci:
+            "مرحله ۶ آماده است! فایل اتوماسیون DaVinci Resolve (.fcpxml + اسکریپت پایتون + زیرنویس SRT) و مونتاژ MP4 نهایی در دسترس شماست.",
+          completed: "تبریک! پست تخصصی شما در هر ۶ مرحله تکمیل و در مغز دوم (Vault) آرشیو شد.",
+        };
+        const text = msgByStage[nextProj.currentStage];
+        if (text) {
+          setChatMessages((prev) => [
+            ...prev,
+            { id: `a_adv_${Date.now()}`, role: "assistant", text },
+          ]);
+        }
       }
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "خطا در ادامه مراحل");
+      setErrorBanner(err instanceof Error ? err.message : "خطا در اجرای مرحله");
     } finally {
       setIsRunning(false);
     }
   };
 
-  // Conversational feedback from the Right Chat Box for the active stage
   const handleSendStageFeedback = async (feedbackText: string) => {
     if (!activeProject) return;
     setChatMessages((prev) => [
@@ -620,11 +618,117 @@ export default function App() {
       {
         id: `a_fb_${Date.now()}`,
         role: "assistant",
-        text: "تغییرات درخواستی شما اعمال و نسخه جدید در سمت چپ نمایش داده شد.",
+        text: "نسخه اصلاح‌شده آماده شد و این نکته در حافظه بلندمدت ایجنت ذخیره گردید تا در پست‌های بعدی هم رعایت شود.",
       },
     ]);
   };
 
+  // Stage 3: Regenerate the 2 storyboard preview frames of a single 3-8s shot
+  const handleRegenerateSingleShotFrames = async (
+    shotNumber: number,
+    updatedPrompt?: string,
+    feedback?: string
+  ) => {
+    if (!activeProject) return;
+    setErrorBanner(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${activeProject.id}/shots/${shotNumber}/regenerate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ updatedPrompt, feedback }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "بازتولید ۲ فریم شات ناموفق بود.");
+      if (data.project) {
+        upsertProject(data.project, false);
+        void syncProjectIfSignedIn(data.project);
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در بازتولید فریم‌های شات");
+    }
+  };
+
+  // Stage 4: Render playable MP4 for a single 3-8s shot
+  const handleRenderShotVideo = async (
+    shotNumber: number,
+    revisionNote?: string,
+    engineId?: LocalVideoEngineId
+  ) => {
+    if (!activeProject) return;
+    setErrorBanner(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${activeProject.id}/shots/${shotNumber}/render-video`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ revisionNote, engineId }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "رندر ویدیوی شات ناموفق بود.");
+      if (data.project) {
+        upsertProject(data.project, false);
+        void syncProjectIfSignedIn(data.project);
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در ساخت ویدیوی شات");
+    }
+  };
+
+  // Stage 4: Render & QA-verify all shots in batch
+  const handleRenderAllShots = async (engineId: LocalVideoEngineId) => {
+    if (!activeProject) return;
+    setErrorBanner(null);
+    try {
+      const res = await fetch(`/api/projects/${activeProject.id}/shots/render-all`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engineId, autoApprove: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "رندر دسته‌جمعی شات‌ها ناموفق بود.");
+      if (data.project) {
+        upsertProject(data.project, false);
+        void syncProjectIfSignedIn(data.project);
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در رندر خودکار همه شات‌ها");
+    }
+  };
+
+  // Stage 4: Approve or mark needs_revision for a single shot video
+  const handleApproveShotVideo = async (
+    shotNumber: number,
+    status: ShotVideoApprovalStatus,
+    revisionNote?: string
+  ) => {
+    if (!activeProject) return;
+    setErrorBanner(null);
+    try {
+      const res = await fetch(
+        `/api/projects/${activeProject.id}/shots/${shotNumber}/approve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status, revisionNote }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "ثبت وضعیت شات ناموفق بود.");
+      if (data.project) {
+        upsertProject(data.project, false);
+        void syncProjectIfSignedIn(data.project);
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : "خطا در تایید شات");
+    }
+  };
+
+  // Stage 5: Re-synthesize WAV voiceover
   const handleResynthesizeAudio = async (params: {
     narrationText: string;
     voiceName: VoicePersona;
@@ -641,7 +745,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "تولید مجدد صدا با خطا مواجه شد.");
       if (data.project) {
-        upsertProject(data.project);
+        upsertProject(data.project, false);
         void syncProjectIfSignedIn(data.project);
       }
     } catch (err) {
@@ -649,100 +753,24 @@ export default function App() {
     }
   };
 
-  const handleRegenerateSingleShot = async (
-    shotNumber: number,
-    updatedPrompt?: string,
-    feedback?: string
-  ) => {
+  // Stage 6: Assemble playable Master MP4
+  const handleAssembleMasterMp4 = async () => {
     if (!activeProject) return;
     setErrorBanner(null);
     try {
-      const res = await fetch(`/api/projects/${activeProject.id}/shots/${shotNumber}/regenerate`, {
+      const res = await fetch(`/api/projects/${activeProject.id}/davinci/assemble-master`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updatedPrompt, feedback }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "بازتولید تصویر صحنه با خطا مواجه شد.");
+      if (!res.ok) throw new Error(data.error || "مونتاژ ویدیوی نهایی ناموفق بود.");
       if (data.project) {
-        upsertProject(data.project);
+        upsertProject(data.project, false);
         void syncProjectIfSignedIn(data.project);
       }
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "خطا در بازتولید صحنه");
+      setErrorBanner(err instanceof Error ? err.message : "خطا در مونتاژ ویدیوی نهایی");
     }
   };
-
-  const handleStartVideoRender = async (opts: {
-    aspectRatio: VideoAspectFormat;
-    qualityMode: VideoQualityMode;
-    burnSubtitles: boolean;
-    includeBackgroundMusic: boolean;
-  }) => {
-    if (!activeProject) return;
-    setErrorBanner(null);
-    try {
-      const res = await fetch(`/api/projects/${activeProject.id}/video/render`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(opts),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "شروع پایپ‌لاین رندر ویدیو با خطا مواجه شد.");
-      if (data.project) {
-        setProjects((prev) => prev.map((p) => (p.id === data.project.id ? data.project : p)));
-      }
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "خطا در شروع رندر ویدیو");
-    }
-  };
-
-  const handleRetryVideoShot = async (shotId: string, humanInstruction?: string) => {
-    if (!activeProject) return;
-    setErrorBanner(null);
-    try {
-      const res = await fetch(`/api/projects/${activeProject.id}/video/shots/${shotId}/retry`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ humanInstruction }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "بازسازی شات با خطا مواجه شد.");
-      if (data.project) {
-        setProjects((prev) => prev.map((p) => (p.id === data.project.id ? data.project : p)));
-        void syncProjectIfSignedIn(data.project);
-      }
-    } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : "خطا در بازسازی شات");
-    }
-  };
-
-  useEffect(() => {
-    if (
-      !activeProject?.id ||
-      (activeProject.videoProduction?.status !== "running" &&
-        activeProject.videoProduction?.status !== "assembling")
-    ) {
-      return;
-    }
-    const targetId = activeProject.id;
-    const timer = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/projects/${targetId}/video/status`);
-        const data = await res.json();
-        if (res.ok && data.videoProduction) {
-          setProjects((prev) =>
-            prev.map((p) =>
-              p.id === targetId ? { ...p, videoProduction: data.videoProduction } : p
-            )
-          );
-        }
-      } catch {
-        // ignore transient poll failure
-      }
-    }, 2200);
-    return () => clearInterval(timer);
-  }, [activeProject?.id, activeProject?.videoProduction?.status]);
 
   const downloadFile = (filename: string, content: string, mime: string) => {
     const blob = new Blob([content], { type: mime });
@@ -765,25 +793,25 @@ export default function App() {
       ``,
     ];
     if (proj.researchScript) {
-      lines.push(`## ۱. پژوهش و سناریو (${proj.researchScript.videoTitle})`);
-      lines.push(`### خلاصه پژوهش`, proj.researchScript.researchSummary, "");
+      lines.push(`## ۱. سناریو (${proj.researchScript.videoTitle})`);
       lines.push(`### قلاب (Hook)`, proj.researchScript.hook, "");
       lines.push(`### بدنه`, proj.researchScript.body, "");
       lines.push(`### دعوت به اقدام (CTA)`, proj.researchScript.cta, "");
     }
-    if (proj.voiceover) {
-      lines.push(`## ۲. متن نریشن (گوینده: ${proj.voiceover.voiceName})`);
-      lines.push(proj.voiceover.narrationText, "");
+    if (proj.narration) {
+      lines.push(`## ۲. متن گویندگی اعراب‌گذاری‌شده`);
+      lines.push(proj.narration.vocalizedNarrationText, "");
     }
     if (proj.director) {
-      lines.push(`## ۳. چیدمان صحنه‌ها`);
+      lines.push(`## ۳. دکوپاژ شات‌های ۳ تا ۸ ثانیه`);
       for (const s of proj.director.shots) {
         lines.push(
-          `### صحنه ${s.shotNumber} (${s.timecode} · ${s.durationSeconds} ثانیه)`,
+          `### شات ${s.shotNumber} (${s.timecode} · ${s.durationSeconds} ثانیه)`,
           `- **دوربین:** ${s.cameraAngle} — ${s.cameraMovement}`,
           `- **متن روی تصویر:** ${s.onScreenText}`,
           `- **گفتار:** ${s.spokenSegment}`,
-          `- **شرح صحنه:** ${s.sceneDescriptionFa}`,
+          `- **فریم شروع:** ${s.startFrameDescriptionFa || s.sceneDescriptionFa}`,
+          `- **فریم اوج:** ${s.endFrameDescriptionFa || ""}`,
           ``
         );
       }
@@ -801,12 +829,12 @@ export default function App() {
 
   const isStageAccessible = (stage: PipelineStage): boolean => {
     if (!activeProject) return false;
-    const activeRank = STAGE_RANK[activeProject.currentStage];
     if (stage === "research_script") return Boolean(activeProject.researchScript);
-    if (stage === "storyboard") return Boolean(activeProject.director);
-    if (stage === "video_shots") return activeRank >= STAGE_RANK.video_shots && Boolean(activeProject.director);
+    if (stage === "narration") return Boolean(activeProject.narration);
+    if (stage === "director") return Boolean(activeProject.director);
+    if (stage === "shot_videos") return Boolean(activeProject.director);
     if (stage === "voiceover") return Boolean(activeProject.voiceover);
-    if (stage === "assembly") return activeRank >= STAGE_RANK.assembly;
+    if (stage === "davinci") return Boolean(activeProject.davinciPackage);
     return false;
   };
 
@@ -816,9 +844,9 @@ export default function App() {
     FORMATS_BY_PLATFORM[currentPlatformKey]?.find((f) => f.id === contentFormat)?.label || "ریلز";
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#0B0D11] text-slate-100">
-      {/* Ultra-Clean 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-6 border-b border-[#262B38] bg-[#0B0D11]/95 px-6 py-3.5 backdrop-blur-sm">
+    <div className="flex min-h-screen flex-col overflow-x-hidden bg-[#0B0D11] text-slate-100">
+      {/* Strict 3-Zone Top Bar */}
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-3 border-b border-[#262B38] bg-[#0B0D11]/95 px-4 py-3.5 backdrop-blur-sm sm:gap-6 sm:px-6">
         <button
           type="button"
           onClick={() => setActiveTab("workspace")}
@@ -827,11 +855,13 @@ export default function App() {
           استودیو محتوا
         </button>
 
-        <nav className="flex items-center gap-7 overflow-x-auto text-xs font-medium text-slate-400">
+        <nav className="flex min-w-0 flex-1 items-center justify-center gap-5 overflow-x-auto text-xs font-medium text-slate-400 sm:gap-6">
           {[
-            { id: "workspace", label: "میز کار هوشمند" },
-            { id: "projects", label: "پروژه‌ها و نسخه ویندوز" },
-            { id: "router", label: "روتر مدل‌ها" },
+            { id: "workspace", label: "میز کار تولید" },
+            { id: "pages", label: "پروفایل پیج‌ها" },
+            { id: "viral", label: "رادار رقبا و وایرال" },
+            { id: "vault", label: "مغز دوم (Vault)" },
+            { id: "router", label: "پروژه‌ها و روتر رایگان" },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -839,7 +869,7 @@ export default function App() {
               onClick={() => setActiveTab(tab.id as AppTab)}
               className={`border-b-2 py-1 whitespace-nowrap shrink-0 transition-colors ${
                 activeTab === tab.id
-                  ? "border-amber-500 text-slate-100"
+                  ? "border-amber-500 text-slate-100 font-semibold"
                   : "border-transparent hover:text-slate-200"
               }`}
             >
@@ -848,44 +878,14 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-2.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              void fetchBrowserState();
-              setIsBrowserDrawerOpen(true);
-            }}
-            className="inline-flex items-center gap-2 rounded-lg border border-[#2A3142] bg-[#141925] px-3.5 py-2 text-xs font-semibold text-slate-200 transition-colors hover:border-sky-500/50 hover:text-sky-300 whitespace-nowrap shrink-0"
-            title="مشاهده زنده مرورگر مخفی ایجنت (پنجره کشویی)"
-          >
-            <Globe
-              className={`h-3.5 w-3.5 ${
-                isAnalyzing ||
-                isRunning ||
-                isExecutingBrowserCmd ||
-                browserState?.status === "browsing" ||
-                browserState?.status === "extracting"
-                  ? "animate-spin text-amber-400"
-                  : "text-sky-400"
-              }`}
-            />
-            <span>مرورگر مخفی ایجنت</span>
-            {browserState && browserState.actionLog.length > 0 && (
-              <span className="font-mono text-[11px] font-bold text-amber-400 tabular-nums">
-                ({browserState.actionLog.length})
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleStartNewProject}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 whitespace-nowrap shrink-0"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>شروع ایده جدید</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={handleStartNewProject}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 whitespace-nowrap shrink-0"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          <span>پست جدید</span>
+        </button>
       </header>
 
       {/* Main Content */}
@@ -899,15 +899,40 @@ export default function App() {
             <button
               type="button"
               onClick={() => setErrorBanner(null)}
-              className="text-red-300 underline hover:text-white"
+              className="text-red-300 underline hover:text-white whitespace-nowrap shrink-0"
             >
               بستن
             </button>
           </div>
         )}
 
-        {activeTab === "projects" ? (
-          <ProjectsAndDesktopView
+        {activeTab === "pages" ? (
+          <PageProfilesView
+            pages={pages}
+            activePageId={selectedPageId}
+            onSelectPageForProduction={(page) => {
+              applyPageProfileToComposer(page);
+              handleStartNewProject();
+            }}
+            onRefreshPages={(updated) => setPages(updated)}
+          />
+        ) : activeTab === "viral" ? (
+          <ViralCompetitorRadarView
+            pages={pages}
+            activePageId={selectedPageId}
+            onUseViralPatternAsIdea={(ideaText, pageId) => {
+              if (pageId) {
+                const matched = pages.find((p) => p.id === pageId) ?? null;
+                if (matched) applyPageProfileToComposer(matched);
+              }
+              handleStartNewProject();
+              setDraftIdea(ideaText);
+            }}
+          />
+        ) : activeTab === "vault" ? (
+          <VaultSecondBrainView pages={pages} />
+        ) : activeTab === "router" ? (
+          <RouterSettingsView
             projects={projects}
             selectedProjectId={selectedProjectId}
             firebaseUser={firebaseUser}
@@ -919,14 +944,14 @@ export default function App() {
             onExportMarkdown={handleExportMarkdown}
             onExportJson={handleExportJson}
           />
-        ) : activeTab === "router" ? (
-          <RouterSettingsView />
         ) : (
-          /* Two-Pane Guided Workspace: Right = Chat Box, Left = 5-Stage Real Studio Canvas */
+          /* Two-Pane Production Workspace: Right = Page & Topic Assistant, Left = 6-Stage Canvas */
           <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
-            {/* RIGHT PANE (first in RTL grid): Guided Chat Box */}
-            <div className="lg:sticky lg:top-20 lg:col-span-5">
+            {/* RIGHT PANE (first in RTL grid) */}
+            <div className="min-w-0 lg:sticky lg:top-20 lg:col-span-4">
               <GuidedStudioChat
+                pages={pages}
+                selectedPageId={selectedPageId}
                 activeStage={activeProject ? viewingStage : "input"}
                 hasActiveProject={Boolean(activeProject)}
                 isAnalyzing={isAnalyzing}
@@ -938,19 +963,22 @@ export default function App() {
                 messages={chatMessages}
                 pendingBrief={pendingBrief}
                 pendingAnalysis={pendingAnalysis}
+                onSelectPageProfile={applyPageProfileToComposer}
+                onManagePages={() => setActiveTab("pages")}
                 onChangePlatform={setPlatform}
                 onChangeFormat={setContentFormat}
                 onChangePageMaturity={setPageMaturity}
                 onAnalyzeIdea={handleAnalyzeIdea}
                 onSelectProposalAndStart={handleSelectProposalAndStart}
+                onStartAutopilotFromProposal={handleStartAutopilot}
                 onSendStageFeedback={handleSendStageFeedback}
               />
             </div>
 
-            {/* LEFT PANE (second in RTL grid): Clean 5-Step Real Studio Progress Canvas */}
-            <div className="space-y-5 lg:col-span-7">
-              {/* Calm 5-Step Horizontal Progress Strip */}
-              <div className="grid grid-cols-2 gap-2 rounded-2xl border border-[#262B38] bg-[#14171F] p-2 sm:grid-cols-5">
+            {/* LEFT PANE (second in RTL grid): 6-Step Studio Pipeline */}
+            <div className="min-w-0 space-y-5 lg:col-span-8">
+              {/* 6-Stage Horizontal Progress Strip */}
+              <div className="grid grid-cols-2 gap-2 rounded-2xl border border-[#262B38] bg-[#14171F] p-2 sm:grid-cols-3 xl:grid-cols-6">
                 {STEP_ITEMS.map((step) => {
                   const accessible = isStageAccessible(step.stage);
                   const isViewing = Boolean(activeProject) && viewingStage === step.stage;
@@ -970,108 +998,85 @@ export default function App() {
                       type="button"
                       disabled={!accessible}
                       onClick={() => setViewingStage(step.stage)}
-                      className={`flex items-center justify-center gap-2 rounded-xl px-2.5 py-2.5 text-xs font-medium transition-colors ${
+                      className={`flex flex-col items-start justify-center rounded-xl px-3 py-2 text-right transition-colors ${
                         isViewing
-                          ? "bg-amber-500 text-slate-950 font-semibold"
+                          ? "bg-amber-500 text-slate-950"
                           : accessible
                             ? "bg-[#0B0D11]/60 text-slate-200 hover:bg-[#1B1F2A]"
-                            : "text-slate-500 opacity-60 cursor-not-allowed"
+                            : "cursor-not-allowed text-slate-500 opacity-60"
                       }`}
                     >
-                      {isDone && !isViewing ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                      ) : isPausedHere && !isViewing ? (
-                        <PauseCircle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-                      ) : !isViewing ? (
-                        <Clock className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                      ) : null}
-                      <span className="truncate">
+                      <div className="flex w-full items-center justify-between gap-1 text-[10px]">
+                        <span className={isViewing ? "font-semibold text-slate-900" : "text-slate-400"}>
+                          {step.agentLabel}
+                        </span>
+                        {isDone && !isViewing ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                        ) : isPausedHere && !isViewing ? (
+                          <PauseCircle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                        ) : !isViewing ? (
+                          <Clock className="h-3 w-3 shrink-0 opacity-50" />
+                        ) : null}
+                      </div>
+                      <div className="mt-0.5 truncate text-xs font-bold">
                         {step.num}. {step.label}
-                      </span>
+                      </div>
                     </button>
                   );
                 })}
               </div>
 
-              {/* Left Canvas Content */}
+              {/* Left Canvas Body */}
               {isRunning && !activeProject ? (
                 <div className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-8">
                   <div className="flex items-center gap-3 text-sm font-semibold text-amber-400">
                     <span className="h-4 w-4 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
-                    <span>در حال تحقیق در وب و نگارش بهترین سناریو برای شما...</span>
+                    <span>ایجنت سناریونویس در حال پژوهش در وب و نگارش سناریوی تخصصی شماست...</span>
                   </div>
-                  <div className="h-48 animate-pulse rounded-xl bg-[#1B1F2A]" />
-                  <div className="h-48 animate-pulse rounded-xl bg-[#1B1F2A]" />
+                  <div className="h-44 animate-pulse rounded-xl bg-[#1B1F2A]" />
+                  <div className="h-44 animate-pulse rounded-xl bg-[#1B1F2A]" />
                 </div>
               ) : !activeProject && pendingAnalysis ? (
-                /* Deep Domain & Audience Intelligence + Comparison View of 3 Distinct Viral Angles */
+                /* Deep Comparison View of the 3 Viral Proposals */
                 <div className="space-y-6 rounded-2xl border border-[#262B38] bg-[#14171F] p-6">
                   <div className="border-b border-[#262B38] pb-4">
                     <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-amber-400">
-                      <span>تحلیل تخصصی ایجنت سناریونویس</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{PLATFORM_NAMES[platform]} ({activeFormatLabel})</span>
+                      <span>تحلیل ۳۶۰ درجه ابر-ایجنت سناریونویس</span>
                       <span aria-hidden="true">·</span>
                       <span>
-                        {(pendingBrief?.pageMaturity || pageMaturity) === "new_page"
-                          ? "شروع پیج (پست‌های ۱ تا ۵)"
-                          : "پیج فعال (۱۰ تا ۲۰+ پست)"}
+                        {PLATFORM_NAMES[platform]} ({activeFormatLabel})
                       </span>
                     </div>
                     <h2 className="mt-1 text-lg font-bold text-slate-100">
-                      شناخت مخاطب دقیق و ۳ زاویه متمایز وایرال
+                      مقایسه ۳ گزینه برتر پیشنهادی (ارزش محتوا، قلاب، روانشناسی و استراتژی)
                     </h2>
                   </div>
 
-                  {/* Deep Keyword Domain, Exact Target Audience Persona & Core Pain Points */}
                   {(pendingAnalysis.keywordDomainAnalysis ||
                     pendingAnalysis.exactTargetAudience ||
-                    pendingAnalysis.pageStrategyRecommendation ||
-                    (pendingAnalysis.corePainPoints && pendingAnalysis.corePainPoints.length > 0)) && (
-                    <div className="space-y-4 border-b border-[#262B38] pb-5 text-xs leading-6">
-                      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
-                        {pendingAnalysis.keywordDomainAnalysis && (
-                          <div>
-                            <div className="mb-1 font-semibold text-amber-300">حوزه تخصصی و ماهیت واقعی بازار</div>
-                            <p className="text-slate-300">{pendingAnalysis.keywordDomainAnalysis}</p>
-                          </div>
-                        )}
-                        {pendingAnalysis.exactTargetAudience && (
-                          <div>
-                            <div className="mb-1 font-semibold text-emerald-300">پرسونای دقیق مخاطب هدف</div>
-                            <p className="text-slate-300">{pendingAnalysis.exactTargetAudience}</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {pendingAnalysis.pageStrategyRecommendation && (
-                        <div className="border-t border-[#262B38]/60 pt-3">
-                          <div className="mb-1 font-semibold text-sky-300">
-                            استراتژی متناسب با وضعیت فعلی پیج
-                          </div>
-                          <p className="text-slate-300">{pendingAnalysis.pageStrategyRecommendation}</p>
+                    pendingAnalysis.pageStrategyRecommendation) && (
+                    <div className="grid grid-cols-1 gap-4 border-b border-[#262B38] pb-5 text-xs leading-6 md:grid-cols-3">
+                      {pendingAnalysis.keywordDomainAnalysis && (
+                        <div>
+                          <div className="mb-1 font-semibold text-amber-300">حوزه و بازار واقعی</div>
+                          <p className="text-slate-300">{pendingAnalysis.keywordDomainAnalysis}</p>
                         </div>
                       )}
-
-                      {pendingAnalysis.corePainPoints && pendingAnalysis.corePainPoints.length > 0 && (
+                      {pendingAnalysis.exactTargetAudience && (
                         <div>
-                          <div className="mb-1.5 font-semibold text-slate-200">
-                            دغدغه‌ها، ریسک‌ها و سوالات پنهان مخاطب هدف:
-                          </div>
-                          <ul className="grid grid-cols-1 gap-1.5 text-slate-300 sm:grid-cols-2">
-                            {pendingAnalysis.corePainPoints.map((pain, pIdx) => (
-                              <li key={pIdx} className="flex items-start gap-2">
-                                <span className="mt-1 text-amber-400">•</span>
-                                <span>{pain}</span>
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="mb-1 font-semibold text-emerald-300">پرسونای دقیق مخاطب</div>
+                          <p className="text-slate-300">{pendingAnalysis.exactTargetAudience}</p>
+                        </div>
+                      )}
+                      {pendingAnalysis.pageStrategyRecommendation && (
+                        <div>
+                          <div className="mb-1 font-semibold text-sky-300">استراتژی رشد پیج</div>
+                          <p className="text-slate-300">{pendingAnalysis.pageStrategyRecommendation}</p>
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* 3 Sharply Differentiated Viral Proposals */}
                   <div className="divide-y divide-[#262B38]">
                     {pendingAnalysis.proposals.map((prop, idx) => (
                       <div key={prop.id} className="space-y-4 py-5 first:pt-0 last:pb-0">
@@ -1089,20 +1094,31 @@ export default function App() {
                             <h3 className="text-base font-bold text-slate-100">
                               {idx + 1}. {prop.title}
                             </h3>
-                            {prop.targetAudienceSegment && (
-                              <p className="text-xs leading-6 text-emerald-300">
-                                مخاطب دقیق این موضوع: {prop.targetAudienceSegment}
+                            {prop.contentValueScoreNote && (
+                              <p className="text-xs text-emerald-300">
+                                ارزش محتوا و جذب مخاطب: {prop.contentValueScoreNote}
                               </p>
                             )}
                           </div>
-                          <button
-                            type="button"
-                            disabled={isRunning}
-                            onClick={() => handleSelectProposalAndStart(prop)}
-                            className="shrink-0 rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50"
-                          >
-                            انتخاب و ساخت سناریو
-                          </button>
+                          <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              disabled={isRunning}
+                              onClick={() => handleSelectProposalAndStart(prop)}
+                              className="rounded-lg bg-amber-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50 whitespace-nowrap shrink-0"
+                            >
+                              انتخاب و نگارش سناریوی کامل
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isRunning}
+                              onClick={() => handleStartAutopilot(prop)}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50 whitespace-nowrap shrink-0"
+                            >
+                              <Zap className="h-3.5 w-3.5" />
+                              <span>تولید خودکار تا ریلز نهایی</span>
+                            </button>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-1 gap-3 border-t border-[#262B38]/60 pt-3 text-xs leading-6 md:grid-cols-2">
@@ -1112,50 +1128,25 @@ export default function App() {
                           </div>
                           {prop.openingVisualHook && (
                             <div>
-                              <div className="font-semibold text-slate-200">تصویر و صحنه شروع برای توقف اسکرول</div>
+                              <div className="font-semibold text-slate-200">تصویر شروع (توقف اسکرول)</div>
                               <p className="mt-0.5 text-slate-300">{prop.openingVisualHook}</p>
                             </div>
                           )}
                         </div>
 
-                        {prop.keyFactsAndDataPoints && prop.keyFactsAndDataPoints.length > 0 && (
-                          <div className="border-t border-[#262B38]/60 pt-3 text-xs leading-6">
-                            <div className="mb-1.5 font-semibold text-slate-200">
-                              نکات تخصصی، استانداردها و داده‌های کلیدی داخل سناریو:
-                            </div>
-                            <ul className="space-y-1 text-slate-300">
-                              {prop.keyFactsAndDataPoints.map((fact, fIdx) => (
-                                <li key={fIdx} className="flex items-start gap-2">
-                                  <span className="text-amber-400">–</span>
-                                  <span>{fact}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-
                         <div className="grid grid-cols-1 gap-4 border-t border-[#262B38]/60 pt-3 text-xs leading-6 text-slate-300 md:grid-cols-3">
                           <div>
-                            <div className="mb-1 font-semibold text-slate-100">استراتژی محتوا</div>
+                            <div className="mb-1 font-semibold text-slate-100">استراتژی پیج</div>
                             <p>{prop.strategistAngle}</p>
                           </div>
                           <div>
-                            <div className="mb-1 font-semibold text-slate-100">روانشناسی سوشال مدیا</div>
+                            <div className="mb-1 font-semibold text-slate-100">روانشناسی مخاطب</div>
                             <p>{prop.psychologyTrigger}</p>
                           </div>
                           <div>
-                            <div className="mb-1 font-semibold text-slate-100">اجرا و کارگردانی</div>
+                            <div className="mb-1 font-semibold text-slate-100">اجرای بصری و تدوین</div>
                             <p>{prop.creatorExecutionTip}</p>
                           </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[#262B38]/60 pt-2.5 text-[11px] leading-6">
-                          {prop.ctaStrategy && (
-                            <span className="text-amber-300">
-                              دعوت به اقدام (CTA): {prop.ctaStrategy}
-                            </span>
-                          )}
-                          <span className="text-emerald-400">{prop.viralPotentialNote}</span>
                         </div>
                       </div>
                     ))}
@@ -1182,154 +1173,169 @@ export default function App() {
                   )}
                 </div>
               ) : !activeProject ? (
-                /* Calm Guided Welcome State before any idea is submitted */
+                /* Clean Guided Empty State when starting a brand-new post */
                 <div className="space-y-6 rounded-2xl border border-[#262B38] bg-[#14171F] p-8">
                   <div className="space-y-2">
                     <div className="inline-flex items-center gap-2 text-xs font-semibold text-amber-400">
                       <Sparkles className="h-4 w-4" />
-                      <span>مسیر استاندارد استودیوی واقعی تولید ویدیو</span>
+                      <span>خط تولید ۶ مرحله‌ای بدون نیاز به تجربه قبلی تدوین یا گویندگی</span>
                     </div>
                     <h1 className="text-xl font-bold text-slate-100">
-                      تولید حرفه‌ای ویدیو در ۵ مرحله واقعی (سناریو تا مونتاژ نهایی)
+                      از موضوع خام تا ویدیوی آماده انتشار و پروژه DaVinci Resolve — ۱۰۰٪ رایگان
                     </h1>
                     <p className="text-xs leading-7 text-slate-400">
-                      بدون پیچیدگی اضافه؛ در کادر سمت راست ایده را بنویسید تا پروژه طبق ترتیب استودیویی جلو برود.
+                      پروفایل پیج خود را در ستون سمت راست انتخاب کنید و موضوع امروز را بنویسید.
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۱. سناریو</div>
+                      <div className="text-xs font-bold text-amber-400">۱. ۳ پیشنهاد وایرال و سناریو</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        تحقیق در وب با مرورگر ایجنت و نگارش سناریو با قلاب و بدنه مهندسی‌شده.
+                        تحلیل ارزش محتوا، قلاب ۳ ثانیه اول، روانشناسی مخاطب و رعایت خطوط قرمز الگوریتم.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۲. استوری‌بورد</div>
+                      <div className="text-xs font-bold text-amber-400">۲. اعراب‌گذاری و کلون صدای شما</div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        دکوپاژ دقیق، زاویه دوربین، متن روی کادر و فریم‌های استوری‌بورد هر شات.
+                        نگارش متن گویندگی با کسره و حرکات دقیق فارسی + تولید صدا با لحن اختصاصی هر پیج.
                       </p>
                     </div>
                     <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۳. ساخت شات‌های ویدیو</div>
+                      <div className="text-xs font-bold text-amber-400">
+                        ۳. شات‌های ۳ تا ۸ ثانیه + DaVinci
+                      </div>
                       <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        تولید کلیپ شات‌ها با مرورگر ایجنت (Google Flow / Veo 2 / Leonardo) و چیدمان سه‌بعدی Three.js.
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4">
-                      <div className="text-xs font-bold text-amber-400">۴. ساخت صدا برای ویدیو</div>
-                      <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        تنظیم متن نریشن منطبق با زمان شات‌ها و ضبط صوت WAV با گوینده فارسی.
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-[#262B38] bg-[#0B0D11]/60 p-4 sm:col-span-2 lg:col-span-2">
-                      <div className="text-xs font-bold text-amber-400">۵. تدوین، میکس و مونتاژ نهایی</div>
-                      <p className="mt-1.5 text-xs leading-6 text-slate-300">
-                        میکس شات‌های ویدیویی و صدای گوینده در Remotion + FFmpeg، زیرنویس فارسی و خروجی MP4 آماده انتشار.
+                        ۲ فریم پیش‌نمایش و تایید ویدیوی تک‌تک شات‌ها + خروجی خودکار DaVinci Resolve رایگان.
                       </p>
                     </div>
                   </div>
                 </div>
-              ) : viewingStage === "research_script" && activeProject.researchScript ? (
-                <StageResearchScript
-                  data={activeProject.researchScript}
-                  isRunning={isRunning}
-                  isCurrentGate={activeProject.currentStage === "research_script"}
-                  onSaveEdits={(updated) => handleSaveInline({ researchScript: updated })}
-                  onApprove={(updated) =>
-                    handleResumeCheckpoint({ action: "approve", researchScript: updated })
-                  }
-                  onRegenerate={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                />
-              ) : viewingStage === "storyboard" && activeProject.director ? (
-                <StageStoryboard
-                  director={activeProject.director}
-                  visuals={activeProject.visuals}
-                  isRunning={isRunning}
-                  isCurrentGate={activeProject.currentStage === "storyboard"}
-                  onSaveEdits={(updated) => handleSaveInline({ director: updated })}
-                  onRegenerateShot={handleRegenerateSingleShot}
-                  onApprove={(updated) =>
-                    handleResumeCheckpoint({ action: "approve", director: updated })
-                  }
-                  onRegenerateAll={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                />
-              ) : viewingStage === "video_shots" && activeProject.director ? (
-                <StageVideoShots
-                  project={activeProject}
-                  visuals={activeProject.visuals}
-                  directorShots={activeProject.director.shots}
-                  browserState={browserState}
-                  isRunning={isRunning}
-                  isExecutingBrowserCmd={isExecutingBrowserCmd}
-                  isCurrentGate={activeProject.currentStage === "video_shots"}
-                  onRegenerateShot={handleRegenerateSingleShot}
-                  onGenerateWebStudioShot={handleGenerateBrowserStudioShot}
-                  onOpenBrowserDrawer={() => {
-                    void fetchBrowserState();
-                    setIsBrowserDrawerOpen(true);
-                  }}
-                  onRegenerateAll={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                  onApprove={() => handleResumeCheckpoint({ action: "approve" })}
-                />
-              ) : viewingStage === "voiceover" && activeProject.voiceover ? (
-                <StageVoiceover
-                  data={activeProject.voiceover}
-                  isRunning={isRunning}
-                  isCurrentGate={activeProject.currentStage === "voiceover"}
-                  onSaveEdits={(updated) => handleSaveInline({ voiceover: updated })}
-                  onResynthesizeAudio={handleResynthesizeAudio}
-                  onApprove={(updated) =>
-                    handleResumeCheckpoint({ action: "approve", voiceover: updated })
-                  }
-                  onRegenerateTextAndAudio={(feedback) =>
-                    handleResumeCheckpoint({ action: "regenerate", feedback })
-                  }
-                />
-              ) : viewingStage === "assembly" ? (
-                <StageAssembly
-                  platform={activeProject.brief.platform}
-                  contentFormat={activeProject.brief.contentFormat}
-                  videoProduction={activeProject.videoProduction}
-                  isRunning={isRunning}
-                  isCompleted={activeProject.currentStage === "completed"}
-                  onStartVideoRender={handleStartVideoRender}
-                  onRetryVideoShot={handleRetryVideoShot}
-                  onExportBible={() => handleExportMarkdown(activeProject)}
-                  onFinalize={() => handleResumeCheckpoint({ action: "approve" })}
-                />
-              ) : null}
+              ) : (
+                /* Active Project 6-Stage Canvas */
+                <div className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-6">
+                  {activeProject.currentStage !== "completed" &&
+                    activeProject.currentStage !== "davinci" && (
+                      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 px-4 py-3 text-xs">
+                        <div className="min-w-0 text-slate-300">
+                          <span className="font-semibold text-slate-100">
+                            {activeProject.brief.title}
+                          </span>
+                          <span aria-hidden="true" className="mx-2 text-slate-600">
+                            ·
+                          </span>
+                          <span className="text-slate-400">
+                            می‌توانید گام‌به‌گام تایید کنید یا کل مراحل را تا ریلز نهایی خودکار بسازید
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isRunning}
+                          onClick={() => void handleRunProjectAutopilot()}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-2 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-50 whitespace-nowrap shrink-0"
+                        >
+                          <Zap className="h-3.5 w-3.5" />
+                          <span>
+                            {isRunning
+                              ? "در حال اجرای خودکار و بازبینی..."
+                              : "تکمیل خودکار تا ریلز نهایی (Autopilot)"}
+                          </span>
+                        </button>
+                      </div>
+                    )}
+
+                  {viewingStage === "research_script" && activeProject.researchScript && (
+                    <StageResearchScript
+                      data={activeProject.researchScript}
+                      isRunning={isRunning}
+                      isCurrentGate={activeProject.currentStage === "research_script"}
+                      onSaveEdits={(updated) => handleSaveInline({ researchScript: updated })}
+                      onApprove={(updated) =>
+                        handleResumeCheckpoint({ action: "approve", researchScript: updated })
+                      }
+                      onRegenerate={(feedback) =>
+                        handleResumeCheckpoint({ action: "regenerate", feedback })
+                      }
+                    />
+                  )}
+
+                  {viewingStage === "narration" && activeProject.narration && (
+                    <StageNarration
+                      data={activeProject.narration}
+                      isRunning={isRunning}
+                      isCurrentGate={activeProject.currentStage === "narration"}
+                      onSaveEdits={(updated) => handleSaveInline({ narration: updated })}
+                      onApprove={(updated) =>
+                        handleResumeCheckpoint({ action: "approve", narration: updated })
+                      }
+                      onRegenerate={(feedback) =>
+                        handleResumeCheckpoint({ action: "regenerate", feedback })
+                      }
+                    />
+                  )}
+
+                  {viewingStage === "director" && activeProject.director && (
+                    <StageDirector
+                      data={activeProject.director}
+                      visuals={activeProject.visuals}
+                      isRunning={isRunning}
+                      isCurrentGate={activeProject.currentStage === "director"}
+                      onSaveEdits={(updated) => handleSaveInline({ director: updated })}
+                      onRegenerateSingleShotFrames={handleRegenerateSingleShotFrames}
+                      onApprove={(updated) =>
+                        handleResumeCheckpoint({ action: "approve", director: updated })
+                      }
+                      onRegenerate={(feedback) =>
+                        handleResumeCheckpoint({ action: "regenerate", feedback })
+                      }
+                    />
+                  )}
+
+                  {viewingStage === "shot_videos" && activeProject.director && (
+                    <StageShotVideos
+                      director={activeProject.director}
+                      visuals={activeProject.visuals}
+                      shotClips={activeProject.shotClips ?? []}
+                      preferredEngine={activeProject.brief.preferredVideoEngine}
+                      isRunning={isRunning}
+                      onRenderShotVideo={handleRenderShotVideo}
+                      onRenderAllShots={handleRenderAllShots}
+                      onApproveShotVideo={handleApproveShotVideo}
+                      onAdvanceToVoiceover={() => handleResumeCheckpoint({ action: "approve" })}
+                    />
+                  )}
+
+                  {viewingStage === "voiceover" && activeProject.voiceover && (
+                    <StageVoiceover
+                      data={activeProject.voiceover}
+                      isRunning={isRunning}
+                      isCurrentGate={activeProject.currentStage === "voiceover"}
+                      onSaveEdits={(updated) => handleSaveInline({ voiceover: updated })}
+                      onResynthesizeAudio={handleResynthesizeAudio}
+                      onApprove={(updated) =>
+                        handleResumeCheckpoint({ action: "approve", voiceover: updated })
+                      }
+                      onRegenerateTextAndAudio={(feedback) =>
+                        handleResumeCheckpoint({ action: "regenerate", feedback })
+                      }
+                    />
+                  )}
+
+                  {viewingStage === "davinci" && activeProject.davinciPackage && (
+                    <StageDaVinciResolve
+                      project={activeProject}
+                      pkg={activeProject.davinciPackage}
+                      isRunning={isRunning}
+                      onAssembleMasterMp4={handleAssembleMasterMp4}
+                      onCompleteProject={() => handleResumeCheckpoint({ action: "approve" })}
+                    />
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
       </main>
-
-      {/* Slide-over Hidden Agent Browser Inspector Window */}
-      <AgentBrowserDrawer
-        isOpen={isBrowserDrawerOpen}
-        onClose={() => setIsBrowserDrawerOpen(false)}
-        browserState={browserState}
-        activeProject={activeProject}
-        isExecutingCommand={isExecutingBrowserCmd}
-        onDispatchCommand={handleDispatchBrowserCommand}
-        onAddProfile={handleAddBrowserProfile}
-        onSwitchProfile={handleSwitchBrowserProfile}
-        onResetQuota={handleResetBrowserQuota}
-        onUpdateSiteConfig={handleUpdateBrowserSiteConfig}
-        onGenerateStudioShot={handleGenerateBrowserStudioShot}
-        onClearBrowser={handleClearBrowserState}
-        onRefreshState={fetchBrowserState}
-        onApplyExtractedToIdea={(extractedText) => {
-          setActiveTab("workspace");
-          setDraftIdea(extractedText);
-        }}
-      />
     </div>
   );
 }

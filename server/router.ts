@@ -3,7 +3,6 @@ import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
 import type {
   AgentRouteTarget,
-  GroundedSource,
   RouterConfigPublic,
   RouterModelEntry,
   RouterProviderAccount,
@@ -15,7 +14,7 @@ const DATA_DIR = path.resolve(process.cwd(), "data");
 const ROUTER_CONFIG_FILE = path.join(DATA_DIR, "router_config.json");
 
 interface StoredProviderAccount extends Omit<RouterProviderAccount, "hasApiKey" | "maskedKey"> {
-  apiKey: string;
+  envVarName: string;
 }
 
 interface StoredRouterConfig {
@@ -35,10 +34,21 @@ export const PROVIDER_DEFAULT_URLS: Record<RouterProviderKind, string> = {
   openai_compatible: "",
 };
 
+const PROVIDER_ENV_VARS: Record<RouterProviderKind, string> = {
+  google: "GEMINI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  groq: "GROQ_API_KEY",
+  cerebras: "CEREBRAS_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  together: "TOGETHER_API_KEY",
+  huggingface: "HUGGINGFACE_API_KEY",
+  openai_compatible: "CUSTOM_OPENAI_API_KEY",
+};
+
 const DEFAULT_GOOGLE_MODELS: RouterModelEntry[] = [
   {
     id: "gemini-4-hydrogen",
-    name: "Gemini 4 Hydrogen (اصلی استودیو)",
+    name: "Gemini 4 Hydrogen (رایگان · استدلال بالا)",
     isFree: true,
     enabled: true,
     lastTestedOk: null,
@@ -46,7 +56,37 @@ const DEFAULT_GOOGLE_MODELS: RouterModelEntry[] = [
   },
   {
     id: "gemini-3.1-flash-lite",
-    name: "Gemini 3.1 Flash Lite (سریع و اقتصادی)",
+    name: "Gemini 3.1 Flash Lite (رایگان · فوق‌سریع و سهمیه بالا)",
+    isFree: true,
+    enabled: true,
+    lastTestedOk: null,
+    lastLatencyMs: null,
+  },
+];
+
+const DEFAULT_OPENROUTER_FREE_MODELS: RouterModelEntry[] = [
+  {
+    id: "meta-llama/llama-3.3-70b-instruct:free",
+    name: "Llama 3.3 70B Instruct (:free)",
+    isFree: true,
+    enabled: true,
+    lastTestedOk: null,
+    lastLatencyMs: null,
+  },
+  {
+    id: "qwen/qwen-2.5-72b-instruct:free",
+    name: "Qwen 2.5 72B Instruct (:free)",
+    isFree: true,
+    enabled: true,
+    lastTestedOk: null,
+    lastLatencyMs: null,
+  },
+];
+
+const DEFAULT_GROQ_MODELS: RouterModelEntry[] = [
+  {
+    id: "llama-3.3-70b-versatile",
+    name: "Llama 3.3 70B Versatile (Groq Free)",
     isFree: true,
     enabled: true,
     lastTestedOk: null,
@@ -65,15 +105,47 @@ function createDefaultStoredConfig(): StoredRouterConfig {
       {
         id: "google_default",
         kind: "google",
-        name: "گوگل جمینای (سرویس پیش‌فرض استودیو)",
+        name: "Google Gemini (سرور پیش‌فرض رایگان)",
         baseUrl: PROVIDER_DEFAULT_URLS.google,
         useServerEnv: true,
-        apiKey: "",
+        envVarName: "GEMINI_API_KEY",
         enabled: true,
         lastSyncedAt: null,
         lastTestStatus: process.env.GEMINI_API_KEY ? "ok" : "untested",
-        lastTestMessage: process.env.GEMINI_API_KEY ? "کلید سرور استودیو متصل است" : null,
-        models: DEFAULT_GOOGLE_MODELS,
+        lastTestMessage: process.env.GEMINI_API_KEY
+          ? "متصل به محیط سرور استودیو"
+          : "در انتظار متغیر محیطی سرور",
+        models: [...DEFAULT_GOOGLE_MODELS],
+      },
+      {
+        id: "openrouter_env",
+        kind: "openrouter",
+        name: "OpenRouter Free Models (محیط سرور)",
+        baseUrl: PROVIDER_DEFAULT_URLS.openrouter,
+        useServerEnv: true,
+        envVarName: "OPENROUTER_API_KEY",
+        enabled: true,
+        lastSyncedAt: null,
+        lastTestStatus: process.env.OPENROUTER_API_KEY ? "ok" : "untested",
+        lastTestMessage: process.env.OPENROUTER_API_KEY
+          ? "متصل از طریق متغیر محیطی OPENROUTER_API_KEY"
+          : "در صورت تعریف OPENROUTER_API_KEY در سرور به زنجیره فالبک اضافه می‌شود",
+        models: [...DEFAULT_OPENROUTER_FREE_MODELS],
+      },
+      {
+        id: "groq_env",
+        kind: "groq",
+        name: "Groq Ultra-Fast Free Tier (محیط سرور)",
+        baseUrl: PROVIDER_DEFAULT_URLS.groq,
+        useServerEnv: true,
+        envVarName: "GROQ_API_KEY",
+        enabled: true,
+        lastSyncedAt: null,
+        lastTestStatus: process.env.GROQ_API_KEY ? "ok" : "untested",
+        lastTestMessage: process.env.GROQ_API_KEY
+          ? "متصل از طریق متغیر محیطی GROQ_API_KEY"
+          : "در صورت تعریف GROQ_API_KEY در سرور فعال می‌شود",
+        models: [...DEFAULT_GROQ_MODELS],
       },
     ],
     agentRoutes: {
@@ -95,20 +167,32 @@ function ensureStoredConfig(): StoredRouterConfig {
   }
   try {
     const raw = fs.readFileSync(ROUTER_CONFIG_FILE, "utf-8");
-    const parsed = JSON.parse(raw) as StoredRouterConfig & {
-      agentRoutes: Record<string, AgentRouteTarget[]>;
-    };
+    const parsed = JSON.parse(raw) as StoredRouterConfig;
     if (!Array.isArray(parsed.providers) || !parsed.agentRoutes) {
       throw new Error("invalid router config");
     }
-    if ("strategist" in parsed.agentRoutes) {
-      if (!parsed.agentRoutes.research_script?.length && parsed.agentRoutes.strategist?.length) {
-        parsed.agentRoutes.research_script = parsed.agentRoutes.strategist;
-      }
-      delete parsed.agentRoutes.strategist;
-      fs.writeFileSync(ROUTER_CONFIG_FILE, JSON.stringify(parsed, null, 2), "utf-8");
-    }
-    return parsed as StoredRouterConfig;
+    // Strip any legacy stored plaintext apiKey field and enforce server-side envVarName
+    const sanitizedProviders: StoredProviderAccount[] = parsed.providers.map((p) => {
+      const envVarName = p.envVarName || PROVIDER_ENV_VARS[p.kind] || "GEMINI_API_KEY";
+      return {
+        id: p.id,
+        kind: p.kind,
+        name: p.name,
+        baseUrl: p.baseUrl,
+        useServerEnv: true,
+        envVarName,
+        enabled: p.enabled,
+        lastSyncedAt: p.lastSyncedAt,
+        lastTestStatus: p.lastTestStatus,
+        lastTestMessage: p.lastTestMessage,
+        models: Array.isArray(p.models) ? p.models : [],
+      };
+    });
+    return {
+      providers: sanitizedProviders,
+      agentRoutes: parsed.agentRoutes,
+      updatedAt: parsed.updatedAt,
+    };
   } catch {
     const def = createDefaultStoredConfig();
     fs.writeFileSync(ROUTER_CONFIG_FILE, JSON.stringify(def, null, 2), "utf-8");
@@ -126,38 +210,27 @@ function saveStoredConfig(cfg: StoredRouterConfig): StoredRouterConfig {
   return next;
 }
 
-function maskSecret(key: string): string {
-  const trimmed = key.trim();
-  if (!trimmed) return "";
-  if (trimmed.length <= 10) return "••••••";
-  return `${trimmed.slice(0, 6)}••••${trimmed.slice(-4)}`;
-}
-
 function resolveProviderKey(p: StoredProviderAccount): string {
-  if (p.useServerEnv && p.kind === "google") {
-    return (p.apiKey?.trim() || process.env.GEMINI_API_KEY || "").trim();
-  }
-  return (p.apiKey || "").trim();
+  const envName = p.envVarName || PROVIDER_ENV_VARS[p.kind];
+  if (!envName) return "";
+  return (process.env[envName] || "").trim();
 }
 
 export function toPublicRouterConfig(cfg?: StoredRouterConfig): RouterConfigPublic {
   const stored = cfg ?? ensureStoredConfig();
   return {
     providers: stored.providers.map((p) => {
+      const envName = p.envVarName || PROVIDER_ENV_VARS[p.kind];
       const effectiveKey = resolveProviderKey(p);
       return {
         id: p.id,
         kind: p.kind,
         name: p.name,
         baseUrl: p.baseUrl,
-        useServerEnv: p.useServerEnv,
+        useServerEnv: true,
+        envVarName: envName,
         hasApiKey: Boolean(effectiveKey),
-        maskedKey:
-          p.useServerEnv && !p.apiKey?.trim()
-            ? process.env.GEMINI_API_KEY
-              ? "کلید پیش‌فرض سرور استودیو"
-              : "تنظیم‌نشده"
-            : maskSecret(p.apiKey),
+        maskedKey: effectiveKey ? `متصل (${envName})` : `تنظیم‌نشده در سرور (${envName})`,
         enabled: p.enabled,
         lastSyncedAt: p.lastSyncedAt,
         lastTestStatus: p.lastTestStatus,
@@ -170,60 +243,14 @@ export function toPublicRouterConfig(cfg?: StoredRouterConfig): RouterConfigPubl
   };
 }
 
-export function addOrUpdateProvider(input: {
-  id?: string;
-  kind: RouterProviderKind;
-  name: string;
-  baseUrl?: string;
-  apiKey?: string;
-  enabled?: boolean;
-}): { config: RouterConfigPublic; providerId: string } {
+export function toggleProviderEnabledServer(
+  providerId: string,
+  enabled: boolean
+): RouterConfigPublic {
   const cfg = ensureStoredConfig();
-  const baseUrl = (input.baseUrl?.trim() || PROVIDER_DEFAULT_URLS[input.kind] || "").replace(/\/+$/, "");
-
-  if (input.id) {
-    const idx = cfg.providers.findIndex((p) => p.id === input.id);
-    if (idx < 0) throw new Error("سرویس‌دهنده موردنظر یافت نشد.");
-    const existing = cfg.providers[idx];
-    cfg.providers[idx] = {
-      ...existing,
-      name: input.name?.trim() || existing.name,
-      baseUrl: baseUrl || existing.baseUrl,
-      apiKey: input.apiKey !== undefined && input.apiKey.trim() !== "" ? input.apiKey.trim() : existing.apiKey,
-      enabled: input.enabled !== undefined ? input.enabled : existing.enabled,
-    };
-    const saved = saveStoredConfig(cfg);
-    return { config: toPublicRouterConfig(saved), providerId: existing.id };
-  }
-
-  const id = `prov_${input.kind}_${Date.now().toString(36)}`;
-  const newProvider: StoredProviderAccount = {
-    id,
-    kind: input.kind,
-    name: input.name.trim() || input.kind,
-    baseUrl,
-    useServerEnv: false,
-    apiKey: (input.apiKey || "").trim(),
-    enabled: input.enabled ?? true,
-    lastSyncedAt: null,
-    lastTestStatus: "untested",
-    lastTestMessage: null,
-    models: input.kind === "google" ? [...DEFAULT_GOOGLE_MODELS] : [],
-  };
-  cfg.providers.push(newProvider);
-  const saved = saveStoredConfig(cfg);
-  return { config: toPublicRouterConfig(saved), providerId: id };
-}
-
-export function deleteProvider(providerId: string): RouterConfigPublic {
-  const cfg = ensureStoredConfig();
-  if (providerId === "google_default") {
-    throw new Error("سرویس‌دهنده پیش‌فرض گوگل قابل حذف نیست؛ می‌توانید آن را غیرفعال یا اولویت آن را جابجا کنید.");
-  }
-  cfg.providers = cfg.providers.filter((p) => p.id !== providerId);
-  for (const agentKey of Object.keys(cfg.agentRoutes) as StudioAgentId[]) {
-    cfg.agentRoutes[agentKey] = cfg.agentRoutes[agentKey].filter((t) => t.providerId !== providerId);
-  }
+  const prov = cfg.providers.find((p) => p.id === providerId);
+  if (!prov) throw new Error("سرویس‌دهنده یافت نشد.");
+  prov.enabled = enabled;
   return toPublicRouterConfig(saveStoredConfig(cfg));
 }
 
@@ -272,7 +299,7 @@ export function addManualModelToProvider(
     provider.models.unshift({
       id: cleanId,
       name: name?.trim() || cleanId,
-      isFree: isFree ?? cleanId.includes(":free"),
+      isFree: isFree ?? true,
       enabled: true,
       lastTestedOk: null,
       lastLatencyMs: null,
@@ -299,7 +326,11 @@ export function updateAgentRoutes(
   return toPublicRouterConfig(saveStoredConfig(cfg));
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 15000): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 15000
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -333,102 +364,22 @@ async function fetchLiveCatalogFromProvider(
 ): Promise<{ models: RouterModelEntry[]; accountNote: string }> {
   const key = resolveProviderKey(provider);
   if (!key) {
-    throw new Error("کلید API برای این سرویس‌دهنده ثبت نشده است.");
+    throw new Error(`متغیر محیطی ${provider.envVarName} روی سرور تنظیم نشده است.`);
   }
 
   if (provider.kind === "google") {
-    const res = await fetchWithTimeout(
-      `${provider.baseUrl || PROVIDER_DEFAULT_URLS.google}/models?key=${encodeURIComponent(key)}`,
-      { method: "GET" },
-      15000
-    );
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`خطا در دریافت لیست مدل‌های گوگل (${res.status}): ${errText.slice(0, 160)}`);
-    }
-    const data = (await res.json()) as {
-      models?: Array<{
-        name: string;
-        displayName?: string;
-        supportedGenerationMethods?: string[];
-        inputTokenLimit?: number;
-      }>;
-    };
-
     const existingMap = new Map(provider.models.map((m) => [m.id, m]));
-    const mergedMap = new Map<string, RouterModelEntry>();
-
-    for (const dm of DEFAULT_GOOGLE_MODELS) {
-      const prev = existingMap.get(dm.id);
-      mergedMap.set(dm.id, prev ? prev : dm);
-    }
-
-    for (const m of data.models ?? []) {
-      const methods = m.supportedGenerationMethods ?? [];
-      if (!methods.includes("generateContent")) continue;
-      const cleanId = m.name.replace(/^models\//, "");
-      if (
-        cleanId.includes("embedding") ||
-        cleanId.includes("aqa") ||
-        cleanId.includes("imagen")
-      ) {
-        continue;
-      }
-      const prev = existingMap.get(cleanId);
-      mergedMap.set(cleanId, {
-        id: cleanId,
-        name: m.displayName || cleanId,
-        isFree: true,
-        enabled: prev?.enabled ?? false,
-        contextLength: m.inputTokenLimit,
-        lastTestedOk: prev?.lastTestedOk ?? null,
-        lastLatencyMs: prev?.lastLatencyMs ?? null,
-      });
-    }
-
+    const merged = DEFAULT_GOOGLE_MODELS.map((dm) => existingMap.get(dm.id) ?? dm);
     return {
-      models: Array.from(mergedMap.values()),
-      accountNote: `${mergedMap.size} مدل زنده از گوگل دریافت شد.`,
+      models: merged,
+      accountNote: `${merged.length} مدل رایگان Gemini آماده سرویس‌دهی در سرور است.`,
     };
   }
 
-  // OpenAI-compatible & OpenRouter
-  const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(/\/+$/, "");
-  if (!baseUrl) {
-    throw new Error("آدرس پایه (Base URL) برای این سرویس‌دهنده وارد نشده است.");
-  }
-
-  let openRouterFreeTierNote = "";
-  let preferFreeOnly = false;
-
-  if (provider.kind === "openrouter") {
-    try {
-      const keyRes = await fetchWithTimeout(
-        `${baseUrl}/auth/key`,
-        {
-          method: "GET",
-          headers: { Authorization: `Bearer ${key}` },
-        },
-        10000
-      );
-      if (keyRes.ok) {
-        const keyJson = (await keyRes.json()) as {
-          data?: { is_free_tier?: boolean; limit_remaining?: number | null; usage?: number };
-        };
-        const isFree = keyJson.data?.is_free_tier;
-        const remaining = keyJson.data?.limit_remaining;
-        if (isFree || remaining === 0) {
-          preferFreeOnly = true;
-          openRouterFreeTierNote = "حساب OpenRouter رایگان شناسایی شد (فیلتر هوشمند مدل‌های رایگان فعال است).";
-        } else {
-          openRouterFreeTierNote = `حساب OpenRouter متصل است (اعتبار باقی‌مانده: ${remaining ?? "نامحدود"}).`;
-        }
-      }
-    } catch {
-      // Proceed cleanly even if /auth/key is unavailable
-    }
-  }
-
+  const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(
+    /\/+$/,
+    ""
+  );
   const headers: Record<string, string> = {
     Authorization: `Bearer ${key}`,
   };
@@ -440,7 +391,7 @@ async function fetchLiveCatalogFromProvider(
   const res = await fetchWithTimeout(`${baseUrl}/models`, { method: "GET", headers }, 18000);
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`خطا در اتصال و دریافت مدل‌ها (${res.status}): ${errText.slice(0, 180)}`);
+    throw new Error(`خطا در دریافت لیست مدل‌ها (${res.status}): ${errText.slice(0, 160)}`);
   }
 
   const json = (await res.json()) as {
@@ -454,7 +405,6 @@ async function fetchLiveCatalogFromProvider(
 
   const rawList = Array.isArray(json.data) ? json.data : [];
   const existingMap = new Map(provider.models.map((m) => [m.id, m]));
-
   const normalized: RouterModelEntry[] = rawList
     .filter((item) => item?.id && isLikelyChatModel(item.id))
     .map((item) => {
@@ -477,11 +427,10 @@ async function fetchLiveCatalogFromProvider(
     })
     .sort((a, b) => Number(b.isFree) - Number(a.isFree));
 
-  const accountNote =
-    openRouterFreeTierNote ||
-    `${normalized.length} مدل به‌روز از سرویس‌دهنده دریافت شد.${preferFreeOnly ? " (مدل‌های رایگان اولویت دارند)" : ""}`;
-
-  return { models: normalized, accountNote };
+  return {
+    models: normalized,
+    accountNote: `${normalized.length} مدل به‌روز از سرویس‌دهنده دریافت شد.`,
+  };
 }
 
 export async function probeSingleModel(
@@ -491,12 +440,19 @@ export async function probeSingleModel(
   const started = Date.now();
   const key = resolveProviderKey(provider);
   if (!key) {
-    return { ok: false, latencyMs: 0, error: "کلید API تنظیم نشده است." };
+    return {
+      ok: false,
+      latencyMs: 0,
+      error: `متغیر ${provider.envVarName} در محیط سرور تعریف نشده است.`,
+    };
   }
 
   try {
     if (provider.kind === "google") {
-      const ai = new GoogleGenAI({ apiKey: key });
+      const ai = new GoogleGenAI({
+        apiKey: key,
+        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+      });
       const res = await ai.models.generateContent({
         model: modelId,
         contents: "فقط عدد 1 را برگردان.",
@@ -504,10 +460,13 @@ export async function probeSingleModel(
       if (res.text !== undefined) {
         return { ok: true, latencyMs: Date.now() - started };
       }
-      return { ok: false, latencyMs: Date.now() - started, error: "پاسخ خالی از گوگل" };
+      return { ok: false, latencyMs: Date.now() - started, error: "پاسخ خالی دریافت شد" };
     }
 
-    const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(/\/+$/, "");
+    const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(
+      /\/+$/,
+      ""
+    );
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
@@ -526,7 +485,6 @@ export async function probeSingleModel(
           model: modelId,
           messages: [{ role: "user", content: "Reply with OK." }],
           max_tokens: 5,
-          temperature: 0,
         }),
       },
       10000
@@ -541,13 +499,7 @@ export async function probeSingleModel(
       };
     }
 
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    if (data.choices && data.choices.length > 0) {
-      return { ok: true, latencyMs: Date.now() - started };
-    }
-    return { ok: false, latencyMs: Date.now() - started, error: "ساختار پاسخ نامعتبر است." };
+    return { ok: true, latencyMs: Date.now() - started };
   } catch (err) {
     return {
       ok: false,
@@ -569,9 +521,7 @@ export async function testProviderConnection(providerId: string): Promise<{
   try {
     const { models, accountNote } = await fetchLiveCatalogFromProvider(provider);
     const probeTarget =
-      models.find((m) => m.enabled && m.isFree) ||
-      models.find((m) => m.isFree) ||
-      models[0];
+      models.find((m) => m.enabled && m.isFree) || models.find((m) => m.isFree) || models[0];
 
     let probeNote = "";
     if (probeTarget) {
@@ -638,10 +588,6 @@ export async function testSingleProviderModel(
   };
 }
 
-/**
- * Syncs live site catalog and optionally probes candidate/free models with the API key
- * so all responding models are automatically enabled in the system!
- */
 export async function syncAndDiscoverProviderModels(
   providerId: string,
   mode: "auto_working" | "catalog"
@@ -667,13 +613,12 @@ export async function syncAndDiscoverProviderModels(
       config: toPublicRouterConfig(saved),
       totalCatalog: models.length,
       enabledWorkingCount: models.filter((m) => m.enabled).length,
-      message: `${models.length} مدل زنده از سایت دریافت شد.`,
+      message: `${models.length} مدل از سرویس دریافت شد.`,
     };
   }
 
-  // auto_working mode: probe free/candidate models to discover which ones respond with this key
   const freeModels = models.filter((m) => m.isFree);
-  const candidates = (freeModels.length > 0 ? freeModels : models).slice(0, 10);
+  const candidates = (freeModels.length > 0 ? freeModels : models).slice(0, 8);
 
   let workingCount = 0;
   const results = await Promise.all(
@@ -695,21 +640,13 @@ export async function syncAndDiscoverProviderModels(
     }
   }
 
-  // If OpenRouter has more :free models beyond top 10, keep them available in catalog (and enabled if already enabled)
-  if (workingCount === 0 && freeModels.length > 0) {
-    // Rate-limit safe fallback: enable top 3 free models if probes hit instant burst throttling
-    for (const fm of freeModels.slice(0, 3)) {
-      fm.enabled = true;
-    }
-  }
-
   provider.models = models;
   provider.lastSyncedAt = new Date().toISOString();
   provider.lastTestStatus = workingCount > 0 ? "ok" : "error";
   provider.lastTestMessage =
     workingCount > 0
-      ? `${workingCount} مدل پاسخگو با کلید شما شناسایی و به لیست فعال اضافه شد.`
-      : `لیست سایت دریافت شد (${models.length} مدل)، اما مدل‌های تست‌شده در این لحظه پاسخ ندادند.`;
+      ? `${workingCount} مدل رایگان پاسخگو شناسایی و فعال شد.`
+      : `لیست دریافت شد (${models.length} مدل).`;
 
   const saved = saveStoredConfig(cfg);
   return {
@@ -740,10 +677,6 @@ function extractJsonObject(rawText: string): string {
   return cleaned;
 }
 
-/**
- * Executes a structured JSON agent prompt through the configured Multi-Provider Router
- * with automatic ordered Fallback Chain across all active targets.
- */
 export async function executeAgentJsonWithRouter<T>(params: {
   agentId: StudioAgentId;
   prompt: string;
@@ -755,7 +688,6 @@ export async function executeAgentJsonWithRouter<T>(params: {
   const cfg = ensureStoredConfig();
   const configuredChain = cfg.agentRoutes[params.agentId] ?? [];
 
-  // Always guarantee fallback to studio's built-in Google models if user chain is empty or fails
   const fallbackTargets: AgentRouteTarget[] = [
     { providerId: "google_default", modelId: "gemini-4-hydrogen" },
     { providerId: "google_default", modelId: "gemini-3.1-flash-lite" },
@@ -774,7 +706,7 @@ export async function executeAgentJsonWithRouter<T>(params: {
   }
 
   if (chain.length === 0) {
-    throw new Error("هیچ سرویس‌دهنده یا مدل فعالی در روتر برای این ایجنت در دسترس نیست.");
+    throw new Error("هیچ سرویس‌دهنده فعالی در محیط سرور یافت نشد. متغیر GEMINI_API_KEY را در تنظیمات سرور بررسی کنید.");
   }
 
   const errors: string[] = [];
@@ -811,8 +743,10 @@ export async function executeAgentJsonWithRouter<T>(params: {
         return { data: parsed, usedProvider: provider.name, usedModel: target.modelId };
       }
 
-      // OpenAI-compatible provider (OpenRouter, Groq, Cerebras, Mistral, Together, Custom)
-      const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(/\/+$/, "");
+      const baseUrl = (provider.baseUrl || PROVIDER_DEFAULT_URLS[provider.kind] || "").replace(
+        /\/+$/,
+        ""
+      );
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
@@ -825,7 +759,9 @@ export async function executeAgentJsonWithRouter<T>(params: {
       const jsonGuide = params.expectArray
         ? "\n\nCRITICAL: Return ONLY a valid JSON array (no markdown fences, no commentary)."
         : params.expectedKeys?.length
-          ? `\n\nCRITICAL: Return ONLY a valid JSON object containing these exact keys: ${params.expectedKeys.join(", ")}. No markdown fences or extra commentary.`
+          ? `\n\nCRITICAL: Return ONLY a valid JSON object containing these exact keys: ${params.expectedKeys.join(
+              ", "
+            )}. No markdown fences or extra commentary.`
           : "\n\nCRITICAL: Return ONLY valid JSON with no markdown fences.";
 
       const bodyPayload: Record<string, unknown> = {
@@ -833,10 +769,9 @@ export async function executeAgentJsonWithRouter<T>(params: {
         messages: [
           ...(params.systemInstruction
             ? [{ role: "system", content: `${params.systemInstruction}${jsonGuide}` }]
-            : [{ role: "system", content: `You are a helpful Persian content studio AI.${jsonGuide}` }]),
+            : [{ role: "system", content: `You are a Persian content studio AI.${jsonGuide}` }]),
           { role: "user", content: params.prompt },
         ],
-        temperature: 0.7,
       };
       if (!params.expectArray) {
         bodyPayload.response_format = { type: "json_object" };
@@ -848,7 +783,6 @@ export async function executeAgentJsonWithRouter<T>(params: {
         60000
       );
 
-      // Retry without response_format if provider rejects json_object parameter
       if (!res.ok && res.status === 400 && bodyPayload.response_format) {
         delete bodyPayload.response_format;
         res = await fetchWithTimeout(
@@ -909,13 +843,9 @@ export async function testAgentChain(agentId: StudioAgentId): Promise<{
 }
 
 export function getGoogleApiKeyFromRouter(): string {
-  const cfg = ensureStoredConfig();
-  const googleProv = cfg.providers.find((p) => p.kind === "google" && p.enabled);
-  if (googleProv) {
-    const k = resolveProviderKey(googleProv);
-    if (k) return k;
+  const envKey = process.env.GEMINI_API_KEY?.trim();
+  if (!envKey) {
+    throw new Error("کلید محیطی GEMINI_API_KEY در بخش Settings > Secrets سرور تنظیم نشده است.");
   }
-  const envKey = process.env.GEMINI_API_KEY;
-  if (!envKey) throw new Error("کلید API گوگل در تنظیمات سرور یا روتر یافت نشد.");
   return envKey;
 }

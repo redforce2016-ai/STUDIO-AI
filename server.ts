@@ -1,150 +1,84 @@
 import "dotenv/config";
 import express from "express";
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import { createServer as createViteServer } from "vite";
 import {
+  buildDaVinciPackageSummary,
+  generateDaVinciBundleZip,
+} from "./server/davinciResolve.js";
+import {
   formatGeminiError,
   runAudioTranscriptionAgent,
+  runCompetitorAndViralRadar,
   runQuickSearchResearch,
   runStrategistTopicProposals,
-  runStudioImageAgent,
-  runStudioVideoAgent,
   runVisualProducerForShot,
   runVoiceoverAgent,
 } from "./server/gemini.js";
-import { resumePipeline, startPipeline } from "./server/langgraphPipeline.js";
-import { getRunOutputDir, runPreflightCheck } from "./server/video/config.js";
 import {
-  getVideoRun,
-  retryShotAndReassemble,
-  runVideoProductionPipeline,
-} from "./server/video/graph.js";
-import { ensureRemotionBrowser } from "./server/video/providers/remotion.js";
-import type { VideoAspectFormat, VideoQualityMode } from "./src/types/videoPipeline.js";
+  resumePipeline,
+  runAutonomousEndToEndPipeline,
+  startPipeline,
+} from "./server/langgraphPipeline.js";
 import {
-  createProject,
-  deleteProject,
-  deleteStudioAsset,
-  getAudioDir,
-  getImagesDir,
-  getProject,
-  getVideosDir,
-  getVisualsDir,
-  listProjects,
-  listStudioAssets,
-  saveProject,
-  saveStudioAsset,
-} from "./server/store.js";
+  buildComfyUiLightweightWorkflow,
+  getLocalEnginesStatus,
+} from "./server/localVideoEngines.js";
 import {
-  PROVIDER_DEFAULT_URLS,
   addManualModelToProvider,
-  addOrUpdateProvider,
-  deleteProvider,
   syncAndDiscoverProviderModels,
   testAgentChain,
   testProviderConnection,
   testSingleProviderModel,
   toPublicRouterConfig,
+  toggleProviderEnabledServer,
   toggleProviderModel,
   updateAgentRoutes,
 } from "./server/router.js";
-import { generateWindowsBundleZip, getWindowsBundlePreviews } from "./server/windowsBundle.js";
 import {
-  WEB_STUDIO_CATALOG,
-  addOrUpdateBrowserProfile,
-  clearAgentBrowserState,
-  dispatchAgentBrowserCommand,
-  executeWebStudioShotGeneration,
-  getAgentBrowserState,
-  resetProfileDailyQuota,
-  switchActiveBrowserProfile,
-  updateWebStudioSiteConfig,
-} from "./server/agentBrowser.js";
+  assembleApprovedProjectMasterMp4,
+  renderSingleStudioShotMp4,
+} from "./server/singleShotRenderer.js";
+import {
+  createProject,
+  deleteAgentMemory,
+  deletePageProfile,
+  deleteProject,
+  getAudioDir,
+  getImagesDir,
+  getPageProfile,
+  getProject,
+  getVaultSnapshotAndSyncDisk,
+  getVideosDir,
+  getVisualsDir,
+  listAgentMemories,
+  listPageProfiles,
+  listProjects,
+  listViralReports,
+  recordAgentLearning,
+  saveAudioFile,
+  saveCustomVaultNote,
+  savePageProfile,
+  saveProject,
+  saveViralReport,
+} from "./server/store.js";
+import { getRunOutputDir, runPreflightCheck } from "./server/video/config.js";
+import { ensureRemotionBrowser } from "./server/video/providers/remotion.js";
+import { generateWindowsBundleZip, getWindowsBundlePreviews } from "./server/windowsBundle.js";
 import type {
-  AgentBrowserCommandType,
+  AgentMemoryEntry,
   AgentRouteTarget,
-  ImageAspectRatio,
-  ImageResolution,
+  LocalVideoEngineId,
+  PageProfile,
+  PlatformOption,
   ProjectBrief,
-  RouterProviderKind,
+  ShotVideoApprovalStatus,
+  ShotVideoClipRecord,
   StudioAgentId,
-  StudioMediaAsset,
-  VideoAspectRatio,
-  VideoDurationOption,
-  VideoResolutionOption,
+  VaultFolderId,
   VoicePersona,
-  WebStudioGenerationMode,
-  WebStudioModelOption,
-  WebStudioSiteConfig,
-  WebStudioSiteId,
 } from "./src/types/studio.js";
-
-const ROUTER_PROVIDER_PRESETS: Array<{
-  kind: RouterProviderKind;
-  label: string;
-  defaultBaseUrl: string;
-  placeholderKey: string;
-  hintFa: string;
-}> = [
-  {
-    kind: "openrouter",
-    label: "OpenRouter (مدل‌های متنوع و رایگان)",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.openrouter,
-    placeholderKey: "sk-or-v1-...",
-    hintFa: "پشتیبانی از مدل‌های رایگان (:free) و تشخیص خودکار پلن حساب.",
-  },
-  {
-    kind: "groq",
-    label: "Groq (سرعت فوق‌العاده بالا + رایگان)",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.groq,
-    placeholderKey: "gsk_...",
-    hintFa: "اجرای سریع Llama و Qwen و DeepSeek با پلن رایگان.",
-  },
-  {
-    kind: "cerebras",
-    label: "Cerebras (پردازش بسیار سریع + رایگان)",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.cerebras,
-    placeholderKey: "csk-...",
-    hintFa: "پاسخگویی سریع با سهمیه رایگان روزانه.",
-  },
-  {
-    kind: "mistral",
-    label: "Mistral AI",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.mistral,
-    placeholderKey: "...",
-    hintFa: "مدل‌های رسمی میسترال سازگار با OpenAI.",
-  },
-  {
-    kind: "together",
-    label: "Together AI",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.together,
-    placeholderKey: "...",
-    hintFa: "دسترسی به مدل‌های متن‌باز و تجاری.",
-  },
-  {
-    kind: "huggingface",
-    label: "Hugging Face Inference Router",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.huggingface,
-    placeholderKey: "hf_...",
-    hintFa: "مسیر رسمی روتر مدل‌های هاگینگ‌فیس.",
-  },
-  {
-    kind: "google",
-    label: "Google Gemini (کلید شخصی گوگل)",
-    defaultBaseUrl: PROVIDER_DEFAULT_URLS.google,
-    placeholderKey: "AIza...",
-    hintFa: "اتصال مستقیم به کلید شخصی Google AI Studio.",
-  },
-  {
-    kind: "openai_compatible",
-    label: "سرویس دلخواه (OpenAI Compatible)",
-    defaultBaseUrl: "",
-    placeholderKey: "sk-...",
-    hintFa: "هر آدرس Base URL سازگار با OpenAI یا سرور لوکال.",
-  },
-];
 
 const VALID_AGENTS: StudioAgentId[] = [
   "research_script",
@@ -153,30 +87,31 @@ const VALID_AGENTS: StudioAgentId[] = [
   "visuals",
 ];
 
-function resolveServerPort(): number {
-  const portFlagIndex = process.argv.indexOf("--port");
-  if (portFlagIndex !== -1 && process.argv[portFlagIndex + 1]) {
-    const cliPort = Number(process.argv[portFlagIndex + 1]);
-    if (Number.isFinite(cliPort) && cliPort > 0) return cliPort;
-  }
-  return 3000;
-}
-
 async function startServer() {
   const app = express();
-  const httpServer = http.createServer(app);
-  const PORT = resolveServerPort();
+  const PORT = Number(process.env.PORT || 3000);
 
   app.use(express.json({ limit: "50mb" }));
 
-  // Serve generated WAV audio & SVG storyboard media safely
+  // ============================================================================
+  // Media File Streaming (Audio WAV/WebM, Storyboard SVGs, Shot & Master MP4s)
+  // ============================================================================
   app.get("/api/media/audio/:filename", (req, res) => {
     const safeName = path.basename(req.params.filename);
     const fullPath = path.join(getAudioDir(), safeName);
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ error: "فایل صوتی یافت نشد." });
     }
-    res.setHeader("Content-Type", "audio/wav");
+    const ext = path.extname(safeName).toLowerCase();
+    const mime =
+      ext === ".mp3"
+        ? "audio/mpeg"
+        : ext === ".webm"
+          ? "audio/webm"
+          : ext === ".ogg"
+            ? "audio/ogg"
+            : "audio/wav";
+    res.setHeader("Content-Type", mime);
     fs.createReadStream(fullPath).pipe(res);
   });
 
@@ -192,12 +127,19 @@ async function startServer() {
 
   app.get("/api/media/images/:filename", (req, res) => {
     const safeName = path.basename(req.params.filename);
-    const fullPath = path.join(getImagesDir(), safeName);
+    const primaryPath = path.join(getImagesDir(), safeName);
+    const bundledAssetsPath = path.resolve(process.cwd(), "src", "assets", "images", safeName);
+    const fullPath = fs.existsSync(primaryPath) ? primaryPath : bundledAssetsPath;
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ error: "فایل تصویر یافت نشد." });
     }
     const ext = path.extname(safeName).toLowerCase();
-    const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
+    const mime =
+      ext === ".jpg" || ext === ".jpeg"
+        ? "image/jpeg"
+        : ext === ".webp"
+          ? "image/webp"
+          : "image/png";
     res.setHeader("Content-Type", mime);
     fs.createReadStream(fullPath).pipe(res);
   });
@@ -215,11 +157,10 @@ async function startServer() {
       const parts = range.replace(/bytes=/, "").split("-");
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunksize = end - start + 1;
       res.writeHead(206, {
         "Content-Range": `bytes ${start}-${end}/${fileSize}`,
         "Accept-Ranges": "bytes",
-        "Content-Length": chunksize,
+        "Content-Length": end - start + 1,
         "Content-Type": "video/mp4",
       });
       fs.createReadStream(fullPath, { start, end }).pipe(res);
@@ -232,7 +173,6 @@ async function startServer() {
     }
   });
 
-  // Serve artifacts inside output/runs/<runId>/... (shot MP4s, extracted QA frames, final.mp4)
   app.get("/api/media/video-runs/:runId/*", (req, res) => {
     const runId = path.basename(req.params.runId);
     const relPath = String((req.params as Record<string, string>)[0] || "");
@@ -247,43 +187,237 @@ async function startServer() {
     if (!fullPath.startsWith(runDir) || !fs.existsSync(fullPath)) {
       return res.status(404).json({ error: "فایل خروجی ویدیو یافت نشد." });
     }
-    const ext = path.extname(fullPath).toLowerCase();
-    if (ext === ".png") {
-      res.setHeader("Content-Type", "image/png");
-      return fs.createReadStream(fullPath).pipe(res);
-    }
-    if (ext === ".srt") {
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      return fs.createReadStream(fullPath).pipe(res);
-    }
-    if (ext === ".json") {
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-      return fs.createReadStream(fullPath).pipe(res);
-    }
-
     const stat = fs.statSync(fullPath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Accept-Ranges": "bytes",
-        "Content-Length": end - start + 1,
-        "Content-Type": "video/mp4",
-      });
-      return fs.createReadStream(fullPath, { start, end }).pipe(res);
-    }
     res.writeHead(200, {
-      "Content-Length": fileSize,
+      "Content-Length": stat.size,
       "Content-Type": "video/mp4",
     });
     return fs.createReadStream(fullPath).pipe(res);
   });
 
-  // List & fetch projects
+  // ============================================================================
+  // Multi-Page / Channel Profiles + Personal Voice Clone Sample Recording
+  // ============================================================================
+  app.get("/api/pages", (_req, res) => {
+    res.json({ pages: listPageProfiles() });
+  });
+
+  app.post("/api/pages", (req, res) => {
+    const body = req.body as Partial<PageProfile>;
+    if (!body?.name?.trim() || !body?.niche?.trim()) {
+      return res.status(400).json({ error: "نام پیج و حوزه تخصصی الزامی است." });
+    }
+    const now = new Date().toISOString();
+    const created: PageProfile = {
+      id: body.id?.trim() || `page_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: body.name.trim(),
+      handle: body.handle?.trim() || "@new.studio.page",
+      platform: body.platform || "instagram",
+      defaultFormat: body.defaultFormat || "reels",
+      pageMaturity: body.pageMaturity || "new_page",
+      niche: body.niche.trim(),
+      contentStyle: body.contentStyle?.trim() || "محتوای تخصصی، ریتم سریع و کاربردی",
+      targetAudiencePersona: body.targetAudiencePersona?.trim() || "مخاطبان علاقه‌مند به این حوزه تخصصی",
+      audiencePainPoints: Array.isArray(body.audiencePainPoints) ? body.audiencePainPoints : [],
+      brandTone: body.brandTone || "educational",
+      brandToneNoteFa: body.brandToneNoteFa?.trim() || "صمیمی، معتبر و بدون حاشیه",
+      visualAestheticFa: body.visualAestheticFa?.trim() || "نورپردازی کنتراست بالا با زیرنویس خوانا",
+      tabooRedLines: Array.isArray(body.tabooRedLines) ? body.tabooRedLines : [],
+      algorithmGuardrails: Array.isArray(body.algorithmGuardrails) ? body.algorithmGuardrails : [],
+      competitorHandles: Array.isArray(body.competitorHandles) ? body.competitorHandles : [],
+      voiceProfile: body.voiceProfile || {
+        speakerName: `صدای اختصاصی ${body.name.trim()}`,
+        voicePersona: "Kore",
+        prosodyStyle: "بیان شمرده، گرم و با تاکید روی کلمات کلیدی",
+        sampleAudioUrl: null,
+        cloneEnginePreference: "gemini_persona",
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const saved = savePageProfile(created);
+    res.json({ page: saved, pages: listPageProfiles() });
+  });
+
+  app.patch("/api/pages/:id", (req, res) => {
+    const existing = getPageProfile(req.params.id);
+    if (!existing) return res.status(404).json({ error: "پروفایل پیج یافت نشد." });
+    const saved = savePageProfile({
+      ...existing,
+      ...(req.body as Partial<PageProfile>),
+      id: existing.id,
+      voiceProfile: {
+        ...existing.voiceProfile,
+        ...((req.body as Partial<PageProfile>).voiceProfile || {}),
+      },
+    });
+    res.json({ page: saved, pages: listPageProfiles() });
+  });
+
+  app.delete("/api/pages/:id", (req, res) => {
+    const ok = deletePageProfile(req.params.id);
+    if (!ok) return res.status(404).json({ error: "پروفایل پیج یافت نشد." });
+    res.json({ ok: true, pages: listPageProfiles() });
+  });
+
+  // Upload or record user's real voice sample for a Page Profile
+  app.post("/api/pages/:id/voice-sample", async (req, res) => {
+    const existing = getPageProfile(req.params.id);
+    if (!existing) return res.status(404).json({ error: "پروفایل پیج یافت نشد." });
+
+    const { audioBase64, mimeType, speakerName, prosodyStyle, voicePersona, cloneEnginePreference } =
+      req.body as {
+        audioBase64?: string;
+        mimeType?: string;
+        speakerName?: string;
+        prosodyStyle?: string;
+        voicePersona?: VoicePersona;
+        cloneEnginePreference?: PageProfile["voiceProfile"]["cloneEnginePreference"];
+      };
+
+    let sampleAudioUrl = existing.voiceProfile.sampleAudioUrl;
+    let sampleTranscript = existing.voiceProfile.sampleTranscript || "";
+
+    if (audioBase64?.trim()) {
+      const ext = mimeType?.includes("mp3")
+        ? "mp3"
+        : mimeType?.includes("webm")
+          ? "webm"
+          : "wav";
+      const filename = `voice_ref_${existing.id}_${Date.now()}.${ext}`;
+      const buf = Buffer.from(audioBase64, "base64");
+      sampleAudioUrl = saveAudioFile(filename, buf);
+
+      try {
+        const tr = await runAudioTranscriptionAgent({
+          audioBase64,
+          mimeType: mimeType || "audio/webm",
+        });
+        sampleTranscript = tr.transcript;
+      } catch {
+        // Optional transcript enrichment; sample audio is still saved
+      }
+    }
+
+    const updated = savePageProfile({
+      ...existing,
+      voiceProfile: {
+        ...existing.voiceProfile,
+        speakerName: speakerName?.trim() || existing.voiceProfile.speakerName,
+        prosodyStyle: prosodyStyle?.trim() || existing.voiceProfile.prosodyStyle,
+        voicePersona: voicePersona || existing.voiceProfile.voicePersona,
+        cloneEnginePreference:
+          cloneEnginePreference || existing.voiceProfile.cloneEnginePreference,
+        sampleAudioUrl,
+        sampleTranscript,
+      },
+    });
+
+    res.json({ page: updated, pages: listPageProfiles() });
+  });
+
+  // ============================================================================
+  // Safe Grounded Competitor & Weekly Viral Radar
+  // ============================================================================
+  app.get("/api/viral-radar", (_req, res) => {
+    res.json({ reports: listViralReports() });
+  });
+
+  app.post("/api/viral-radar/analyze", async (req, res) => {
+    const { nicheQuery, platform, pageProfileId } = req.body as {
+      nicheQuery?: string;
+      platform?: PlatformOption;
+      pageProfileId?: string | null;
+    };
+    const profile = getPageProfile(pageProfileId);
+    const effectiveQuery = nicheQuery?.trim() || profile?.niche || "";
+    if (!effectiveQuery) {
+      return res.status(400).json({ error: "لطفاً موضوع یا پروفایل پیج را انتخاب کنید." });
+    }
+
+    try {
+      const report = await runCompetitorAndViralRadar({
+        nicheQuery: effectiveQuery,
+        platform: platform || profile?.platform || "instagram",
+        pageProfileId: pageProfileId ?? null,
+      });
+      saveViralReport(report);
+      res.json({ report, reports: listViralReports() });
+    } catch (err) {
+      res.status(500).json({ error: formatGeminiError(err) });
+    }
+  });
+
+  // ============================================================================
+  // Self-Evolving Agent Memory + Obsidian Second Brain Vault
+  // ============================================================================
+  app.get("/api/memories", (_req, res) => {
+    res.json({ memories: listAgentMemories() });
+  });
+
+  app.post("/api/memories", (req, res) => {
+    const body = req.body as {
+      agentId?: AgentMemoryEntry["agentId"];
+      scope?: AgentMemoryEntry["scope"];
+      category?: AgentMemoryEntry["category"];
+      ruleText?: string;
+      sourceEvent?: string;
+      pageProfileId?: string | null;
+      projectId?: string | null;
+      initialStrength?: number;
+    };
+    if (!body?.ruleText?.trim()) {
+      return res.status(400).json({ error: "متن قانون یا الگو نمی‌تواند خالی باشد." });
+    }
+    const memories = recordAgentLearning({
+      agentId: body.agentId === "director_agent" ? "director_agent" : "scriptwriter_agent",
+      scope: body.scope || (body.pageProfileId ? "page" : "global"),
+      category: body.category || "learned_rule",
+      ruleText: body.ruleText.trim(),
+      sourceEvent: body.sourceEvent?.trim() || "ثبت مستقیم توسط مدیر استودیو",
+      pageProfileId: body.pageProfileId ?? null,
+      projectId: body.projectId ?? null,
+      initialStrength: body.initialStrength ?? 8,
+    });
+    res.json({ memories });
+  });
+
+  app.delete("/api/memories/:id", (req, res) => {
+    const ok = deleteAgentMemory(req.params.id);
+    if (!ok) return res.status(404).json({ error: "حافظه موردنظر یافت نشد." });
+    res.json({ ok: true, memories: listAgentMemories() });
+  });
+
+  app.get("/api/vault", (_req, res) => {
+    const vault = getVaultSnapshotAndSyncDisk();
+    res.json({ vault });
+  });
+
+  app.post("/api/vault/notes", (req, res) => {
+    const { id, title, folder, contentMd, tags } = req.body as {
+      id?: string;
+      title?: string;
+      folder?: VaultFolderId;
+      contentMd?: string;
+      tags?: string[];
+    };
+    if (!title?.trim() || !contentMd?.trim()) {
+      return res.status(400).json({ error: "عنوان و متن یادداشت Markdown الزامی است." });
+    }
+    const note = saveCustomVaultNote({
+      id,
+      title: title.trim(),
+      folder: folder || "02_Viral_Lab",
+      contentMd,
+      tags,
+    });
+    const vault = getVaultSnapshotAndSyncDisk();
+    res.json({ note, vault });
+  });
+
+  // ============================================================================
+  // Projects & 6-Stage Pipeline Endpoints
+  // ============================================================================
   app.get("/api/projects", (_req, res) => {
     res.json({ projects: listProjects() });
   });
@@ -300,66 +434,74 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // Pre-Script Strategist: analyze user idea from Strategist, Psychology & Pro Creator lenses and return 3 viral topics
+  // Step 0: Propose 3 deeply analyzed viral options tailored to the active Page Profile
   app.post("/api/projects/propose-topics", async (req, res) => {
     const brief = req.body as Partial<ProjectBrief>;
     if (!brief?.idea?.trim()) {
-      return res.status(400).json({ error: "لطفاً ایده یا موضوع خود را بنویسید." });
+      return res.status(400).json({ error: "لطفاً موضوع خام را وارد کنید." });
     }
+    const profile = getPageProfile(brief.pageProfileId);
     const cleanIdea = brief.idea.trim();
-    const derivedTitle = brief.title?.trim() || cleanIdea.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) || "پروژه جدید";
+    const derivedTitle =
+      brief.title?.trim() || cleanIdea.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) || "پست جدید";
 
     try {
       const analysis = await runStrategistTopicProposals({
         title: derivedTitle,
         idea: cleanIdea,
-        platform: brief.platform || "instagram",
-        contentFormat: brief.contentFormat || "reels",
-        pageMaturity: brief.pageMaturity === "growing_page" ? "growing_page" : "new_page",
-        tone: brief.tone || "educational",
-        targetDurationSeconds: brief.targetDurationSeconds || 45,
+        pageProfileId: brief.pageProfileId ?? null,
+        platform: brief.platform || profile?.platform || "instagram",
+        contentFormat: brief.contentFormat || profile?.defaultFormat || "reels",
+        pageMaturity: brief.pageMaturity || profile?.pageMaturity || "new_page",
+        tone: brief.tone || profile?.brandTone || "educational",
+        targetDurationSeconds: brief.targetDurationSeconds || 35,
       });
       res.json({ analysis });
     } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
+      res.status(500).json({ error: formatGeminiError(err) });
     }
   });
 
-  // Create a project and immediately run LangGraph Stage 1 (Merged Researcher + Scriptwriter)
+  // Create project & launch Stage 1 (Super-Agent 1: Scenario)
   app.post("/api/projects/start", async (req, res) => {
     const brief = req.body as Partial<ProjectBrief>;
     if (!brief?.idea?.trim()) {
-      return res.status(400).json({ error: "متن ایده برای شروع الزامی است." });
+      return res.status(400).json({ error: "موضوع برای شروع الزامی است." });
     }
+    const profile = getPageProfile(brief.pageProfileId);
     const cleanIdea = brief.idea.trim();
     const resolvedTitle =
       brief.title?.trim() ||
       brief.selectedTopicAngle?.title?.trim() ||
       cleanIdea.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) ||
-      "پروژه محتوای جدید";
-
-    const resolvedTone =
-      brief.selectedTopicAngle?.recommendedTone || brief.tone || "educational";
-    const resolvedToneLabel =
-      brief.selectedTopicAngle?.recommendedToneLabelFa || brief.toneLabelFa;
-    const resolvedDuration =
-      brief.selectedTopicAngle?.recommendedDurationSeconds || brief.targetDurationSeconds || 45;
+      "پست تخصصی جدید";
 
     const project = createProject({
       title: resolvedTitle,
       idea: cleanIdea,
-      platform: brief.platform || "instagram",
-      contentFormat: brief.contentFormat || "reels",
-      pageMaturity: brief.pageMaturity === "growing_page" ? "growing_page" : "new_page",
-      tone: resolvedTone,
-      toneLabelFa: resolvedToneLabel,
-      targetDurationSeconds: resolvedDuration,
+      pageProfileId: brief.pageProfileId ?? null,
+      platform: brief.platform || profile?.platform || "instagram",
+      contentFormat: brief.contentFormat || profile?.defaultFormat || "reels",
+      pageMaturity: brief.pageMaturity || profile?.pageMaturity || "new_page",
+      tone:
+        brief.selectedTopicAngle?.recommendedTone ||
+        brief.tone ||
+        profile?.brandTone ||
+        "educational",
+      toneLabelFa: brief.selectedTopicAngle?.recommendedToneLabelFa || brief.toneLabelFa,
+      targetDurationSeconds:
+        brief.selectedTopicAngle?.recommendedDurationSeconds ||
+        brief.targetDurationSeconds ||
+        35,
       selectedTopicAngle: brief.selectedTopicAngle ?? null,
     });
 
     try {
-      const running = saveProject({ ...project, checkpointStatus: "running", currentStage: "research_script" });
+      const running = saveProject({
+        ...project,
+        checkpointStatus: "running",
+        currentStage: "research_script",
+      });
       const updated = await startPipeline(running);
       res.json({ project: updated });
     } catch (err) {
@@ -374,7 +516,88 @@ async function startServer() {
     }
   });
 
-  // Resume LangGraph checkpoint (approve with edits OR regenerate with feedback)
+  // Autonomous Autopilot: create project from brief and run all stages 1-6 with QA & self-healing
+  app.post("/api/projects/start-autopilot", async (req, res) => {
+    const brief = req.body as Partial<ProjectBrief>;
+    if (!brief?.idea?.trim()) {
+      return res.status(400).json({ error: "موضوع برای اجرای خودکار الزامی است." });
+    }
+    const profile = getPageProfile(brief.pageProfileId);
+    const cleanIdea = brief.idea.trim();
+    const resolvedTitle =
+      brief.title?.trim() ||
+      brief.selectedTopicAngle?.title?.trim() ||
+      cleanIdea.split(/[\n.!؟]/)[0]?.trim().slice(0, 80) ||
+      "پست خودکار جدید";
+
+    const project = createProject({
+      title: resolvedTitle,
+      idea: cleanIdea,
+      pageProfileId: brief.pageProfileId ?? null,
+      platform: brief.platform || profile?.platform || "instagram",
+      contentFormat: brief.contentFormat || profile?.defaultFormat || "reels",
+      pageMaturity: brief.pageMaturity || profile?.pageMaturity || "new_page",
+      tone:
+        brief.selectedTopicAngle?.recommendedTone ||
+        brief.tone ||
+        profile?.brandTone ||
+        "educational",
+      toneLabelFa: brief.selectedTopicAngle?.recommendedToneLabelFa || brief.toneLabelFa,
+      targetDurationSeconds:
+        brief.selectedTopicAngle?.recommendedDurationSeconds ||
+        brief.targetDurationSeconds ||
+        35,
+      selectedTopicAngle: brief.selectedTopicAngle ?? null,
+      preferredVideoEngine: brief.preferredVideoEngine || "hyperframes_html",
+      autonomousMode: true,
+    });
+
+    try {
+      const completed = await runAutonomousEndToEndPipeline(project);
+      res.json({ project: completed });
+    } catch (err) {
+      const msg = formatGeminiError(err);
+      const latest = getProject(project.id) ?? project;
+      const failed = saveProject({
+        ...latest,
+        checkpointStatus: "error",
+        errorMessage: msg,
+      });
+      res.status(500).json({ error: msg, project: failed });
+    }
+  });
+
+  // Autonomous Autopilot on an existing project: finish all remaining stages to final Reels MP4
+  app.post("/api/projects/:id/autopilot", async (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
+
+    const { preferredVideoEngine } = (req.body || {}) as {
+      preferredVideoEngine?: LocalVideoEngineId;
+    };
+    const prepared = preferredVideoEngine
+      ? saveProject({
+          ...project,
+          brief: { ...project.brief, preferredVideoEngine, autonomousMode: true },
+        })
+      : project;
+
+    try {
+      const completed = await runAutonomousEndToEndPipeline(prepared);
+      res.json({ project: completed });
+    } catch (err) {
+      const msg = formatGeminiError(err);
+      const latest = getProject(prepared.id) ?? prepared;
+      const failed = saveProject({
+        ...latest,
+        checkpointStatus: "error",
+        errorMessage: msg,
+      });
+      res.status(500).json({ error: msg, project: failed });
+    }
+  });
+
+  // Resume checkpoint (Approve & advance OR Regenerate with feedback)
   app.post("/api/projects/:id/resume", async (req, res) => {
     const project = getProject(req.params.id);
     if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
@@ -394,7 +617,191 @@ async function startServer() {
     }
   });
 
-  // Synthesize or re-synthesize audio directly when user edits narration text or switches voice persona
+  // Stage 3: Regenerate the 2 preview frames of a single 3-8s shot
+  app.post("/api/projects/:id/shots/:shotNumber/regenerate", async (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project || !project.director) {
+      return res.status(404).json({ error: "پروژه یا دکوپاژ شات‌ها یافت نشد." });
+    }
+    const shotNum = Number(req.params.shotNumber);
+    const shot = project.director.shots.find((s) => s.shotNumber === shotNum);
+    if (!shot) return res.status(404).json({ error: "شات موردنظر یافت نشد." });
+
+    try {
+      const { feedback, updatedPrompt } = req.body as {
+        feedback?: string;
+        updatedPrompt?: string;
+      };
+      const targetShot = updatedPrompt ? { ...shot, visualPromptFa: updatedPrompt } : shot;
+
+      if (feedback?.trim()) {
+        recordAgentLearning({
+          agentId: "director_agent",
+          scope: project.brief.pageProfileId ? "page" : "global",
+          category: "voice_and_edit_rule",
+          ruleText: feedback.trim(),
+          sourceEvent: `اصلاح فریم‌های شات ${shotNum} در پروژه ${project.brief.title}`,
+          pageProfileId: project.brief.pageProfileId ?? null,
+          projectId: project.id,
+        });
+      }
+
+      const regenerated = await runVisualProducerForShot(
+        project.id,
+        targetShot,
+        project.director.visualDirectionSummary,
+        feedback
+      );
+
+      const existingShots = project.visuals?.shots ?? [];
+      const mergedShots = existingShots.some((s) => s.shotNumber === shotNum)
+        ? existingShots.map((s) => (s.shotNumber === shotNum ? regenerated : s))
+        : [...existingShots, regenerated].sort((a, b) => a.shotNumber - b.shotNumber);
+
+      const updated = saveProject({
+        ...project,
+        director: updatedPrompt
+          ? {
+              ...project.director,
+              shots: project.director.shots.map((s) =>
+                s.shotNumber === shotNum ? targetShot : s
+              ),
+            }
+          : project.director,
+        visuals: {
+          styleGuideSummary:
+            project.visuals?.styleGuideSummary ?? project.director.visualDirectionSummary,
+          shots: mergedShots,
+        },
+      });
+      res.json({ project: updated });
+    } catch (err) {
+      res.status(500).json({ error: formatGeminiError(err) });
+    }
+  });
+
+  // Stage 4: Render playable MP4 for a single 3-8s shot
+  app.post("/api/projects/:id/shots/:shotNumber/render-video", async (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project || !project.director) {
+      return res.status(404).json({ error: "پروژه یا دکوپاژ شات‌ها یافت نشد." });
+    }
+    const shotNum = Number(req.params.shotNumber);
+    const shot = project.director.shots.find((s) => s.shotNumber === shotNum);
+    if (!shot) return res.status(404).json({ error: "شات موردنظر یافت نشد." });
+
+    try {
+      const { revisionNote, engineId } = req.body as {
+        revisionNote?: string;
+        engineId?: LocalVideoEngineId;
+      };
+      if (revisionNote?.trim()) {
+        recordAgentLearning({
+          agentId: "director_agent",
+          scope: project.brief.pageProfileId ? "page" : "global",
+          category: "mistake_repaired",
+          ruleText: revisionNote.trim(),
+          sourceEvent: `اصلاح ویدیوی شات ${shotNum} (${project.brief.title})`,
+          pageProfileId: project.brief.pageProfileId ?? null,
+          projectId: project.id,
+        });
+      }
+
+      const renderedClip = await renderSingleStudioShotMp4({
+        project,
+        shot,
+        revisionNote,
+        engineId,
+      });
+
+      const currentClips = project.shotClips ?? [];
+      const nextClips = currentClips.some((c) => c.shotNumber === shotNum)
+        ? currentClips.map((c) => (c.shotNumber === shotNum ? renderedClip : c))
+        : [...currentClips, renderedClip].sort((a, b) => a.shotNumber - b.shotNumber);
+
+      const updated = saveProject({
+        ...project,
+        brief: engineId ? { ...project.brief, preferredVideoEngine: engineId } : project.brief,
+        shotClips: nextClips,
+      });
+      res.json({ project: updated, clip: renderedClip });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در رندر ویدیوی این شات";
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Stage 4: Batch-render & QA-verify all shots automatically with optional auto-approve
+  app.post("/api/projects/:id/shots/render-all", async (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project || !project.director) {
+      return res.status(404).json({ error: "پروژه یا دکوپاژ شات‌ها یافت نشد." });
+    }
+    try {
+      const { engineId, autoApprove } = (req.body || {}) as {
+        engineId?: LocalVideoEngineId;
+        autoApprove?: boolean;
+      };
+      const targetEngine =
+        engineId || project.brief.preferredVideoEngine || "hyperframes_html";
+      const nextClips: ShotVideoClipRecord[] = [];
+      for (const shot of project.director.shots) {
+        const rendered = await renderSingleStudioShotMp4({
+          project,
+          shot,
+          engineId: targetEngine,
+        });
+        nextClips.push(
+          autoApprove && rendered.videoUrl
+            ? { ...rendered, approvalStatus: "approved" }
+            : rendered
+        );
+      }
+      const updated = saveProject({
+        ...project,
+        brief: { ...project.brief, preferredVideoEngine: targetEngine },
+        shotClips: nextClips,
+      });
+      res.json({ project: updated });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در رندر خودکار شات‌ها";
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Stage 4: Approve or mark needs_revision for a single shot video (unlocking the next shot sequentially)
+  app.post("/api/projects/:id/shots/:shotNumber/approve", (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project || !project.director) {
+      return res.status(404).json({ error: "پروژه یافت نشد." });
+    }
+    const shotNum = Number(req.params.shotNumber);
+    const { status, revisionNote } = req.body as {
+      status?: ShotVideoApprovalStatus;
+      revisionNote?: string;
+    };
+    const nextStatus: ShotVideoApprovalStatus =
+      status === "needs_revision" ? "needs_revision" : "approved";
+
+    const currentClips = project.shotClips ?? [];
+    const nextClips = currentClips.map((c) =>
+      c.shotNumber === shotNum
+        ? {
+            ...c,
+            approvalStatus: nextStatus,
+            revisionNote: revisionNote ?? c.revisionNote,
+          }
+        : c
+    );
+
+    const updated = saveProject({
+      ...project,
+      shotClips: nextClips,
+    });
+    res.json({ project: updated });
+  });
+
+  // Stage 5: Synthesize or re-synthesize WAV voiceover
   app.post("/api/projects/:id/voiceover/audio", async (req, res) => {
     const project = getProject(req.params.id);
     if (!project || !project.researchScript) {
@@ -412,11 +819,11 @@ async function startServer() {
         project.id,
         project.researchScript,
         project.brief,
-        voiceName ?? project.voiceover?.voiceName ?? "Kore",
+        voiceName ?? project.voiceover?.voiceName,
         voiceStyle ?? project.voiceover?.voiceStyle,
         feedback,
         narrationText,
-        project.director
+        project.narration
       );
       const updated = saveProject({
         ...project,
@@ -425,59 +832,58 @@ async function startServer() {
       });
       res.json({ project: updated });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در تولید صدای نریشن";
-      res.status(500).json({ error: msg });
+      res.status(500).json({ error: formatGeminiError(err) });
     }
   });
 
-  // Regenerate a single storyboard shot visually
-  app.post("/api/projects/:id/shots/:shotNumber/regenerate", async (req, res) => {
+  // Stage 6: Download complete DaVinci Resolve Free/Studio Automation ZIP
+  app.get("/api/projects/:id/davinci/download", async (req, res) => {
     const project = getProject(req.params.id);
-    if (!project || !project.director) {
-      return res.status(404).json({ error: "پروژه یا دکوپاژ یافت نشد." });
-    }
-    const shotNum = Number(req.params.shotNumber);
-    const shot = project.director.shots.find((s) => s.shotNumber === shotNum);
-    if (!shot) return res.status(404).json({ error: "شات موردنظر یافت نشد." });
+    if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
 
     try {
-      const { feedback, updatedPrompt } = req.body as { feedback?: string; updatedPrompt?: string };
-      const targetShot = updatedPrompt ? { ...shot, visualPromptFa: updatedPrompt } : shot;
-
-      if (updatedPrompt) {
-        project.director = {
-          ...project.director,
-          shots: project.director.shots.map((s) => (s.shotNumber === shotNum ? targetShot : s)),
-        };
-      }
-
-      const regenerated = await runVisualProducerForShot(
-        project.id,
-        targetShot,
-        project.director.visualDirectionSummary,
-        feedback
+      const zipBuffer = await generateDaVinciBundleZip(project);
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="DaVinci_AutoEdit_${project.id}.zip"`
       );
-
-      const existingShots = project.visuals?.shots ?? [];
-      const mergedShots = existingShots.some((s) => s.shotNumber === shotNum)
-        ? existingShots.map((s) => (s.shotNumber === shotNum ? regenerated : s))
-        : [...existingShots, regenerated].sort((a, b) => a.shotNumber - b.shotNumber);
-
-      const updated = saveProject({
-        ...project,
-        visuals: {
-          styleGuideSummary: project.visuals?.styleGuideSummary ?? project.director.visualDirectionSummary,
-          shots: mergedShots,
-        },
-      });
-      res.json({ project: updated });
+      res.send(zipBuffer);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در بازتولید تصویر شات";
+      const msg = err instanceof Error ? err.message : "خطا در ساخت بسته DaVinci Resolve";
       res.status(500).json({ error: msg });
     }
   });
 
-  // Save inline edits to project without advancing stage
+  // Stage 6: Assemble playable Master MP4 from approved shots + WAV narration + -14 LUFS audio
+  app.post("/api/projects/:id/davinci/assemble-master", async (req, res) => {
+    const project = getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
+
+    try {
+      const assembled = await assembleApprovedProjectMasterMp4(project);
+      const baseSummary = project.davinciPackage ?? buildDaVinciPackageSummary(project);
+      const updated = saveProject({
+        ...project,
+        davinciPackage: {
+          ...baseSummary,
+          masterVideoUrl: assembled.masterVideoUrl,
+          qaAudit: assembled.qaAudit,
+          engineUsed: project.brief.preferredVideoEngine || "hyperframes_html",
+          comfyuiWorkflowAvailable: true,
+        },
+      });
+      res.json({
+        project: updated,
+        masterVideoUrl: assembled.masterVideoUrl,
+        qaAudit: assembled.qaAudit,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "خطا در مونتاژ ویدیوی نهایی";
+      res.status(500).json({ error: msg });
+    }
+  });
+
   app.patch("/api/projects/:id", (req, res) => {
     const project = getProject(req.params.id);
     if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
@@ -485,189 +891,64 @@ async function startServer() {
     res.json({ project: updated });
   });
 
-  // ============================================================================
-  // 10-Node Video Production & Visual QA Pipeline Endpoints
-  // ============================================================================
   app.get("/api/video/preflight", (_req, res) => {
     res.json({ preflight: runPreflightCheck() });
   });
 
-  app.get("/api/video/hardware", async (_req, res) => {
-    const { detectHardwareAndWriteConfig, getModelInstallInstructions } = await import(
-      "./server/video/hardware.js"
-    );
-    const report = await detectHardwareAndWriteConfig();
-    res.json({
-      hardware: report.hardware,
-      configPath: report.configPath,
-      installInstructions: getModelInstallInstructions(report.hardware.selectedProfile),
-    });
-  });
-
-  app.post("/api/video/models/setup", async (req, res) => {
+  app.get("/api/video/engines", async (_req, res) => {
     try {
-      const { runConfirmedModelSetup } = await import("./server/video/modelInstaller.js");
-      const { targetProfile } = (req.body || {}) as {
-        targetProfile?: "wan_2_2_5b_gguf" | "wan_2_2_or_ltx_2_3_fp8" | "parallax_only";
-      };
-      const report = await runConfirmedModelSetup({ targetProfile });
-      res.json({ report });
+      const engines = await getLocalEnginesStatus();
+      res.json({ engines });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در آماده‌سازی مدل‌های محلی";
-      res.status(500).json({ error: msg });
+      res.status(500).json({ error: formatGeminiError(err) });
     }
   });
 
-  app.get("/api/video/runs/:runId/srt", (req, res) => {
-    const runDir = getRunOutputDir(req.params.runId);
-    const srtPath = path.join(runDir, "subtitles.srt");
-    if (!fs.existsSync(srtPath)) {
-      return res.status(404).json({ error: "فایل زیرنویس SRT یافت نشد." });
-    }
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${req.params.runId}_subtitles.srt"`);
-    fs.createReadStream(srtPath).pipe(res);
-  });
-
-  app.get("/api/video/runs/:runId/report", (req, res) => {
-    const runDir = getRunOutputDir(req.params.runId);
-    const reportPath = path.join(runDir, "report.json");
-    if (!fs.existsSync(reportPath)) {
-      const live = getVideoRun(req.params.runId);
-      if (!live) return res.status(404).json({ error: "گزارش اجرا یافت نشد." });
-      return res.json(live);
-    }
+  app.get("/api/video/comfyui-workflow", (_req, res) => {
+    const workflow = buildComfyUiLightweightWorkflow();
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${req.params.runId}_report.json"`);
-    fs.createReadStream(reportPath).pipe(res);
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="comfyui_reels_lightweight_workflow.json"'
+    );
+    res.send(JSON.stringify(workflow, null, 2));
   });
 
-  app.post("/api/projects/:id/video/render", async (req, res) => {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
-
-    const preflight = runPreflightCheck();
-    if (!preflight.ready) {
-      return res.status(500).json({
-        error: `پیش‌نیازهای رندر آماده نیست: ${preflight.missingCritical.join("، ")}`,
-        preflight,
-      });
-    }
-
-    const { aspectRatio, qualityMode, burnSubtitles, includeBackgroundMusic } = req.body as {
-      aspectRatio?: VideoAspectFormat;
-      qualityMode?: VideoQualityMode;
-      burnSubtitles?: boolean;
-      includeBackgroundMusic?: boolean;
-    };
-
-    const inferredAspect: VideoAspectFormat =
-      aspectRatio ||
-      (project.brief.contentFormat === "long_video" || project.brief.platform === "youtube"
-        ? "16:9"
-        : "9:16");
-    const chosenQuality: VideoQualityMode = qualityMode === "final_1080p" ? "final_1080p" : "preview_480p";
-
-    const scenarioLines: string[] = [];
-    if (project.researchScript) {
-      scenarioLines.push(`عنوان: ${project.researchScript.videoTitle}`);
-      scenarioLines.push(`قلاب: ${project.researchScript.hook}`);
-      scenarioLines.push(`بدنه: ${project.researchScript.body}`);
-      scenarioLines.push(`CTA: ${project.researchScript.cta}`);
-    } else {
-      scenarioLines.push(project.brief.idea);
-    }
-
-    const narrationWavPath = project.voiceover?.audioFilename
-      ? path.join(getAudioDir(), path.basename(project.voiceover.audioFilename))
-      : null;
-
-    const runId = `vrun_${project.id}_${Date.now()}`;
-    const initialStub = saveProject({
-      ...project,
-      videoProduction: {
-        runId,
-        projectId: project.id,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        aspectRatio: inferredAspect,
-        qualityMode: chosenQuality,
-        status: "running",
-        currentNode: "START",
-        shots: [],
-        logs: [
-          {
-            timestamp: new Date().toISOString(),
-            node: "START",
-            level: "info",
-            message: "پایپ‌لاین ۱۰ مرحله‌ای تولید ویدیو آغاز شد.",
-          },
-        ],
-      },
-    });
-
-    // Run pipeline in background so UI can poll live node-by-node status cleanly
-    void runVideoProductionPipeline({
-      runId,
-      projectId: project.id,
-      scenarioText: scenarioLines.join("\n"),
-      aspectRatio: inferredAspect,
-      qualityMode: chosenQuality,
-      director: project.director,
-      researchScript: project.researchScript,
-      narrationWavPath,
-      burnSubtitles: Boolean(burnSubtitles),
-      includeBackgroundMusic: Boolean(includeBackgroundMusic),
-    }).then((finalRun) => {
-      const latest = getProject(project.id);
-      if (latest) {
-        saveProject({
-          ...latest,
-          videoProduction: finalRun,
-        });
-      }
-    });
-
-    res.json({ project: initialStub, runId });
-  });
-
-  app.get("/api/projects/:id/video/status", (req, res) => {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
-
-    const runId = project.videoProduction?.runId;
-    const liveRun = runId ? getVideoRun(runId) : null;
-    const effective = liveRun || project.videoProduction || null;
-    if (liveRun && project.videoProduction?.updatedAt !== liveRun.updatedAt) {
-      saveProject({ ...project, videoProduction: liveRun });
-    }
-    res.json({ videoProduction: effective });
-  });
-
-  app.post("/api/projects/:id/video/shots/:shotId/retry", async (req, res) => {
-    const project = getProject(req.params.id);
-    if (!project || !project.videoProduction?.runId) {
-      return res.status(404).json({ error: "اجرای ویدیویی برای این پروژه یافت نشد." });
-    }
-    const { humanInstruction } = req.body as { humanInstruction?: string };
+  app.post("/api/studio/research", async (req, res) => {
     try {
-      const updatedRun = await retryShotAndReassemble({
-        runId: project.videoProduction.runId,
-        shotId: req.params.shotId,
-        humanInstruction,
-      });
-      const updatedProj = saveProject({
-        ...project,
-        videoProduction: updatedRun,
-      });
-      res.json({ project: updatedProj, videoProduction: updatedRun });
+      const { query } = req.body as { query?: string };
+      if (!query?.trim()) {
+        return res.status(400).json({ error: "متن پرسش پژوهشی الزامی است." });
+      }
+      const result = await runQuickSearchResearch(query.trim());
+      res.json(result);
     } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
+      res.status(500).json({ error: formatGeminiError(err) });
     }
   });
 
-  // Windows Tauri + Python LangGraph Bundle Preview & ZIP Download
+  app.post("/api/studio/transcribe", async (req, res) => {
+    try {
+      const { audioBase64, mimeType } = req.body as {
+        audioBase64?: string;
+        mimeType?: string;
+      };
+      if (!audioBase64?.trim()) {
+        return res.status(400).json({ error: "داده صوتی ارسال نشده است." });
+      }
+      const result = await runAudioTranscriptionAgent({
+        audioBase64: audioBase64.trim(),
+        mimeType: mimeType || "audio/webm",
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: formatGeminiError(err) });
+    }
+  });
+
+  // ============================================================================
+  // Windows Desktop Tauri + Python + Local Voice Clone Bundle
+  // ============================================================================
   app.get("/api/windows-bundle/preview", (_req, res) => {
     res.json({ files: getWindowsBundlePreviews() });
   });
@@ -678,7 +959,7 @@ async function startServer() {
       res.setHeader("Content-Type", "application/zip");
       res.setHeader(
         "Content-Disposition",
-        'attachment; filename="ContentStudioDesktop-Windows-Tauri-Python.zip"'
+        'attachment; filename="ContentStudioDesktop-Windows-FreeAI.zip"'
       );
       res.send(zipBuffer);
     } catch (err) {
@@ -687,391 +968,22 @@ async function startServer() {
     }
   });
 
-  // Studio Media Assets (Images, Videos, Transcripts)
-  app.get("/api/studio/assets", (_req, res) => {
-    res.json({ assets: listStudioAssets() });
-  });
-
-  app.delete("/api/studio/assets/:id", (req, res) => {
-    const deleted = deleteStudioAsset(req.params.id);
-    if (!deleted) return res.status(404).json({ error: "آیتم مدیا یافت نشد." });
-    res.json({ ok: true });
-  });
-
-  // Create & Edit Images (gemini-nano-banana-2.1)
-  app.post("/api/studio/image", async (req, res) => {
-    try {
-      const { prompt, aspectRatio, imageSize, imageBase64, mimeType, useSearchGrounding, title } = req.body as {
-        prompt?: string;
-        aspectRatio?: ImageAspectRatio;
-        imageSize?: ImageResolution;
-        imageBase64?: string;
-        mimeType?: string;
-        useSearchGrounding?: boolean;
-        title?: string;
-      };
-      if (!prompt?.trim()) {
-        return res.status(400).json({ error: "دستور متنی برای تولید یا ویرایش تصویر الزامی است." });
-      }
-      const result = await runStudioImageAgent({
-        prompt: prompt.trim(),
-        aspectRatio,
-        imageSize,
-        imageBase64,
-        mimeType,
-        useSearchGrounding,
-      });
-
-      const asset: StudioMediaAsset = {
-        id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        kind: "image",
-        title: (title?.trim() || prompt.trim()).slice(0, 120),
-        prompt: prompt.trim(),
-        mediaUrl: result.imageUrl,
-        aspectRatio: aspectRatio || "1:1",
-        modelUsed: "gemini-nano-banana-2.1",
-        notes: result.caption,
-        createdAt: new Date().toISOString(),
-      };
-      saveStudioAsset(asset);
-      res.json({ asset });
-    } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  // Animate Keyframe Locally (ComfyUIProvider + ParallaxVideoProvider fallback; Text-to-Video forbidden)
-  app.post("/api/studio/video", async (req, res) => {
-    try {
-      const { prompt, aspectRatio, duration, resolution, imageBase64, mimeType, title } = req.body as {
-        prompt?: string;
-        aspectRatio?: VideoAspectRatio;
-        duration?: VideoDurationOption;
-        resolution?: VideoResolutionOption;
-        imageBase64?: string;
-        mimeType?: string;
-        title?: string;
-      };
-      if (!prompt?.trim()) {
-        return res.status(400).json({ error: "توضیح حرکت آرام دوربین برای متحرک‌سازی تصویر کلیدی الزامی است." });
-      }
-      if (!imageBase64?.trim()) {
-        return res.status(400).json({
-          error:
-            "قانون کیفیت شماره ۴: تولید ویدیو از متن (Text-to-Video) ممنوع است. لطفاً یک تصویر کلیدی (Keyframe) بارگذاری کنید.",
-        });
-      }
-      const result = await runStudioVideoAgent({
-        prompt: prompt.trim(),
-        aspectRatio,
-        duration,
-        resolution,
-        imageBase64,
-        mimeType,
-      });
-
-      const asset: StudioMediaAsset = {
-        id: `vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        kind: "video",
-        title: (title?.trim() || prompt.trim()).slice(0, 120),
-        prompt: prompt.trim(),
-        mediaUrl: result.videoUrl,
-        aspectRatio: aspectRatio || "16:9",
-        modelUsed: result.providerUsed === "comfyui" ? "ComfyUI Local (Wan 2.2 / LTX-2.3)" : "Local Parallax 2.5D Depth",
-        notes: `متحرک‌سازی محلی Keyframe (${result.providerUsed}) · زمان: ${result.renderDurationMs}ms · تلاش: ${result.attempts}`,
-        createdAt: new Date().toISOString(),
-      };
-      saveStudioAsset(asset);
-      res.json({ asset });
-    } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  // Transcribe Audio (gemini-3.5-transcribe)
-  app.post("/api/studio/transcribe", async (req, res) => {
-    try {
-      const { audioBase64, mimeType, instruction, title } = req.body as {
-        audioBase64?: string;
-        mimeType?: string;
-        instruction?: string;
-        title?: string;
-      };
-      if (!audioBase64) {
-        return res.status(400).json({ error: "داده صوتی ارسال نشده است." });
-      }
-      const { transcript } = await runAudioTranscriptionAgent({
-        audioBase64,
-        mimeType: mimeType || "audio/webm",
-        instruction,
-      });
-
-      const asset: StudioMediaAsset = {
-        id: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        kind: "transcript",
-        title: title?.trim() || `رونویسی صوت (${new Date().toLocaleTimeString("fa-IR")})`,
-        prompt: instruction?.trim() || "تبدیل گفتار به متن فارسی",
-        mediaUrl: null,
-        aspectRatio: "audio",
-        modelUsed: "gemini-3.5-transcribe",
-        transcriptText: transcript,
-        createdAt: new Date().toISOString(),
-      };
-      saveStudioAsset(asset);
-      res.json({ transcript, asset });
-    } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  // Standalone Google Search Grounded Research
-  app.post("/api/studio/research", async (req, res) => {
-    try {
-      const { query } = req.body as { query?: string };
-      if (!query?.trim()) {
-        return res.status(400).json({ error: "متن پرسش پژوهشی الزامی است." });
-      }
-      const result = await runQuickSearchResearch(query.trim());
-      res.json(result);
-    } catch (err) {
-      const msg = formatGeminiError(err);
-      res.status(500).json({ error: msg });
-    }
-  });
-
   // ============================================================================
-  // Playwright Stealth Chromium + LangGraph Multi-Account Agent Browser API
-  // ============================================================================
-  app.get("/api/browser/state", (_req, res) => {
-    res.json({
-      browser: getAgentBrowserState(),
-      catalog: WEB_STUDIO_CATALOG,
-    });
-  });
-
-  app.post("/api/browser/command", async (req, res) => {
-    try {
-      const { command, target, agentName } = (req.body || {}) as {
-        command?: AgentBrowserCommandType;
-        target?: string;
-        agentName?: string;
-      };
-      if (!command) {
-        return res.status(400).json({ error: "نوع دستور مرورگر (command) الزامی است." });
-      }
-      if (
-        (command === "search" ||
-          command === "goto" ||
-          command === "click" ||
-          command === "fill" ||
-          command === "select" ||
-          command === "mission") &&
-        !target?.trim()
-      ) {
-        return res.status(400).json({ error: "مقدار هدف یا عبارت دستور (target) الزامی است." });
-      }
-      const state = await dispatchAgentBrowserCommand({
-        command,
-        target: target || "",
-        agentName,
-      });
-      res.json({ browser: state });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در اجرای دستور مرورگر ایجنت";
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  app.post("/api/browser/profiles", (req, res) => {
-    try {
-      const { id, name, email, password, dailyLimit, connectedSites, notesFa } = (req.body || {}) as {
-        id?: string;
-        name?: string;
-        email?: string;
-        password?: string;
-        dailyLimit?: number;
-        connectedSites?: WebStudioSiteId[];
-        notesFa?: string;
-      };
-      if (!email?.trim()) {
-        return res.status(400).json({ error: "ایمیل اکانت گوگل الزامی است." });
-      }
-      const browser = addOrUpdateBrowserProfile({
-        id,
-        name: name?.trim() || email.trim(),
-        email: email.trim(),
-        password: password?.trim(),
-        dailyLimit,
-        connectedSites,
-        notesFa,
-      });
-      res.json({ browser });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در ثبت پروفایل گوگل";
-      res.status(400).json({ error: msg });
-    }
-  });
-
-  app.post("/api/browser/profiles/:id/switch", (req, res) => {
-    const browser = switchActiveBrowserProfile(
-      req.params.id,
-      "سوییچ دستی پروفایل گوگل توسط کاربر"
-    );
-    res.json({ browser });
-  });
-
-  app.post("/api/browser/profiles/reset-quota", (req, res) => {
-    const { profileId } = (req.body || {}) as { profileId?: string };
-    const browser = resetProfileDailyQuota(profileId);
-    res.json({ browser });
-  });
-
-  app.put("/api/browser/site-config", (req, res) => {
-    const patch = (req.body || {}) as Partial<WebStudioSiteConfig>;
-    const browser = updateWebStudioSiteConfig(patch);
-    res.json({ browser });
-  });
-
-  app.post("/api/browser/studio/generate-shot", async (req, res) => {
-    try {
-      const {
-        rawPrompt,
-        projectId,
-        shotNumber,
-        siteId,
-        mode,
-        modelId,
-        aspectRatio,
-        resolution,
-      } = (req.body || {}) as {
-        rawPrompt?: string;
-        projectId?: string | null;
-        shotNumber?: number | null;
-        siteId?: WebStudioSiteId;
-        mode?: WebStudioGenerationMode;
-        modelId?: WebStudioModelOption;
-        aspectRatio?: "9:16" | "16:9" | "1:1";
-        resolution?: "720p" | "1080p";
-      };
-      if (!rawPrompt?.trim()) {
-        return res.status(400).json({
-          error: "پرامپت شات برای نهایی‌سازی و ارسال به وب‌سایت الزامی است.",
-        });
-      }
-      const result = await executeWebStudioShotGeneration({
-        rawPrompt: rawPrompt.trim(),
-        projectId,
-        shotNumber,
-        siteId,
-        mode,
-        modelId,
-        aspectRatio,
-        resolution,
-      });
-      res.json({
-        job: result.job,
-        browser: result.browserState,
-        project: projectId ? getProject(projectId) : null,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در تولید شات با مرورگر ایجنت";
-      res.status(500).json({ error: msg });
-    }
-  });
-
-  app.post("/api/browser/clear", (_req, res) => {
-    res.json({ browser: clearAgentBrowserState() });
-  });
-
-  // ============================================================================
-  // Multi-Provider AI Router & Fallback Chain API
+  // Server-Env-Only Free AI Router (Zero Client API Key Entry)
   // ============================================================================
   app.get("/api/router/config", (_req, res) => {
     res.json({
       config: toPublicRouterConfig(),
-      presets: ROUTER_PROVIDER_PRESETS,
     });
-  });
-
-  app.post("/api/router/providers", async (req, res) => {
-    try {
-      const { id, kind, name, baseUrl, apiKey, enabled, autoDiscoverWorking } = req.body as {
-        id?: string;
-        kind?: RouterProviderKind;
-        name?: string;
-        baseUrl?: string;
-        apiKey?: string;
-        enabled?: boolean;
-        autoDiscoverWorking?: boolean;
-      };
-      if (!kind || !name?.trim()) {
-        return res.status(400).json({ error: "نوع سرویس‌دهنده و نام حساب الزامی است." });
-      }
-      const created = addOrUpdateProvider({
-        id,
-        kind,
-        name: name.trim(),
-        baseUrl,
-        apiKey,
-        enabled,
-      });
-
-      if (autoDiscoverWorking && apiKey?.trim()) {
-        const discovery = await syncAndDiscoverProviderModels(created.providerId, "auto_working");
-        return res.json({
-          config: discovery.config,
-          providerId: created.providerId,
-          discoveryMessage: discovery.message,
-          enabledWorkingCount: discovery.enabledWorkingCount,
-        });
-      }
-
-      res.json({
-        config: created.config,
-        providerId: created.providerId,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در ثبت سرویس‌دهنده";
-      res.status(400).json({ error: msg });
-    }
   });
 
   app.patch("/api/router/providers/:id", (req, res) => {
     try {
-      const { kind, name, baseUrl, apiKey, enabled } = req.body as {
-        kind?: RouterProviderKind;
-        name?: string;
-        baseUrl?: string;
-        apiKey?: string;
-        enabled?: boolean;
-      };
-      const current = toPublicRouterConfig().providers.find((p) => p.id === req.params.id);
-      if (!current) return res.status(404).json({ error: "حساب سرویس‌دهنده یافت نشد." });
-
-      const updated = addOrUpdateProvider({
-        id: req.params.id,
-        kind: kind || current.kind,
-        name: name?.trim() || current.name,
-        baseUrl,
-        apiKey,
-        enabled,
-      });
-      res.json({ config: updated.config });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در ویرایش سرویس‌دهنده";
-      res.status(400).json({ error: msg });
-    }
-  });
-
-  app.delete("/api/router/providers/:id", (req, res) => {
-    try {
-      const config = deleteProvider(req.params.id);
+      const { enabled } = req.body as { enabled?: boolean };
+      const config = toggleProviderEnabledServer(req.params.id, Boolean(enabled));
       res.json({ config });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در حذف سرویس‌دهنده";
+      const msg = err instanceof Error ? err.message : "خطا در تغییر وضعیت سرویس‌دهنده";
       res.status(400).json({ error: msg });
     }
   });
@@ -1095,7 +1007,7 @@ async function startServer() {
       );
       res.json(result);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در دریافت لیست مدل‌های سرویس‌دهنده";
+      const msg = err instanceof Error ? err.message : "خطا در کشف مدل‌های رایگان";
       res.status(500).json({ error: msg });
     }
   });
@@ -1122,12 +1034,12 @@ async function startServer() {
         isFree?: boolean;
       };
       if (!modelId?.trim()) {
-        return res.status(400).json({ error: "شناسه مدل نمی‌تواند خالی باشد." });
+        return res.status(400).json({ error: "شناسه مدل الزامی است." });
       }
       const config = addManualModelToProvider(req.params.id, modelId.trim(), name, isFree);
       res.json({ config });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در افزودن دستی مدل";
+      const msg = err instanceof Error ? err.message : "خطا در افزودن مدل";
       res.status(400).json({ error: msg });
     }
   });
@@ -1154,7 +1066,7 @@ async function startServer() {
       }
       const { targets } = req.body as { targets?: AgentRouteTarget[] };
       if (!Array.isArray(targets)) {
-        return res.status(400).json({ error: "آرایه مسیرهای مدل نامعتبر است." });
+        return res.status(400).json({ error: "آرایه مسیرها نامعتبر است." });
       }
       const config = updateAgentRoutes(agentId, targets);
       res.json({ config });
@@ -1173,19 +1085,14 @@ async function startServer() {
       const result = await testAgentChain(agentId);
       res.json(result);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "خطا در تست زنجیره ایجنت";
+      const msg = err instanceof Error ? err.message : "خطا در تست زنجیره";
       res.status(500).json({ error: msg });
     }
   });
 
-  // Vite middleware in development, static dist in production
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === "true" ? false : undefined,
-        ws: { server: httpServer },
-      },
+      server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -1197,11 +1104,13 @@ async function startServer() {
     });
   }
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`Content Studio Desktop server listening on http://localhost:${PORT}`);
-    // Pre-warm headless Chromium once at startup without race conditions
     void ensureRemotionBrowser().catch((err) => {
-      console.warn("[video-preflight] Remotion browser pre-warm deferred:", err instanceof Error ? err.message : err);
+      console.warn(
+        "[video-preflight] Remotion browser pre-warm deferred:",
+        err instanceof Error ? err.message : err
+      );
     });
   });
 }

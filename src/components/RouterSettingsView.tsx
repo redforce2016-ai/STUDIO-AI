@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { User } from "firebase/auth";
 import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
-  Eye,
-  EyeOff,
-  KeyRound,
+  FolderOpen,
   ListFilter,
   Play,
   Plus,
   RefreshCw,
   Search,
+  Server,
+  ShieldCheck,
   Trash2,
   Wand2,
   X,
@@ -18,73 +19,77 @@ import {
 } from "lucide-react";
 import type {
   AgentRouteTarget,
+  ProjectRecord,
   RouterConfigPublic,
-  RouterModelEntry,
   RouterProviderAccount,
-  RouterProviderKind,
   StudioAgentId,
 } from "../types/studio";
+import { ProjectsAndDesktopView } from "./ProjectsAndDesktopView";
 
-interface ProviderPreset {
-  kind: RouterProviderKind;
-  label: string;
-  defaultBaseUrl: string;
-  placeholderKey: string;
-  hintFa: string;
+interface RouterSettingsViewProps {
+  projects: ProjectRecord[];
+  selectedProjectId: string | null;
+  firebaseUser: User | null;
+  cloudProjectCount: number;
+  onGoogleSignIn: () => Promise<void>;
+  onGoogleSignOut: () => Promise<void>;
+  onOpenProject: (project: ProjectRecord) => void;
+  onDeleteProject: (id: string) => Promise<void>;
+  onExportMarkdown: (project: ProjectRecord) => void;
+  onExportJson: (project: ProjectRecord) => void;
 }
 
 const AGENT_META: Array<{
   id: StudioAgentId;
+  superAgentBadge: string;
   title: string;
   subtitle: string;
 }> = [
   {
     id: "research_script",
-    title: "۱. ایجنت سناریونویس حرفه‌ای (استراتژیست، پژوهشگر، ویرال و روانشناسی)",
-    subtitle: "تحلیل استراتژیک ایده، روانشناسی سوشال مدیا، پژوهش و اعتبارسنجی وب و نگارش کامل سناریو",
+    superAgentBadge: "ابر-ایجنت ۱: سناریونویس",
+    title: "۱. هسته پژوهشگر وب، استراتژیست وایرال، روانشناسی مخاطب و سناریونویس",
+    subtitle: "تحلیل موضوع خام، پیشنهاد ۳ گزینه برتر و نگارش سناریوی کامل با رعایت الگوریتم",
   },
   {
     id: "voiceover",
-    title: "۲. ایجنت گوینده و کارگردان صدا",
-    subtitle: "آماده‌سازی متن گفتار روان، مکث‌ها و راهنمای لحن اجرا",
+    superAgentBadge: "ابر-ایجنت ۱ و ۲: متن اعراب‌گذاری‌شده و هدایت لحن",
+    title: "۲. هسته نگارش متن گویندگی فارسی (اعراب‌گذاری دقیق و راهنمای فن بیان)",
+    subtitle: "تنظیم کسره‌های اضافه، مکث‌های تنفسی و منحنی احساسی هماهنگ با تصویر",
   },
   {
     id: "director",
-    title: "۳. ایجنت کارگردان و چیدمان صحنه‌ها",
-    subtitle: "شکستن سناریو به شات‌ها، زاویه دوربین، حرکت و متن روی تصویر",
+    superAgentBadge: "ابر-ایجنت ۲: کارگردان و تدوینگر",
+    title: "۳. هسته دکوپاژ شات‌های ۳ تا ۸ ثانیه و طراحی صحنه و افکت صوتی",
+    subtitle: "خرد کردن سناریو به شات‌های کوتاه ۳ تا ۸ ثانیه‌ای با افکت‌های صوتی و برنامه تدوین DaVinci",
   },
   {
     id: "visuals",
-    title: "۴. ایجنت تولیدکننده بصری و استوری‌بورد",
-    subtitle: "طراحی ترکیب‌بندی استوری‌بورد و کادرهای تصویری هر صحنه",
+    superAgentBadge: "ابر-ایجنت ۲: کارگردان بصری",
+    title: "۴. هسته تولید ۲ فریم پیش‌نمایش برای هر شات (فریم شروع + فریم اوج)",
+    subtitle: "ساخت کادرهای پیش‌نمایش استوری‌بورد دوفریمی قبل از رندر ویدیوی هر شات",
   },
 ];
 
-export function RouterSettingsView() {
+export function RouterSettingsView({
+  projects,
+  selectedProjectId,
+  firebaseUser,
+  cloudProjectCount,
+  onGoogleSignIn,
+  onGoogleSignOut,
+  onOpenProject,
+  onDeleteProject,
+  onExportMarkdown,
+  onExportJson,
+}: RouterSettingsViewProps) {
+  const [topSection, setTopSection] = useState<"projects" | "router">("projects");
   const [subTab, setSubTab] = useState<"agents" | "providers">("agents");
   const [config, setConfig] = useState<RouterConfigPublic | null>(null);
-  const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [banner, setBanner] = useState<{ type: "ok" | "error"; text: string } | null>(null);
 
-  // Add Provider Panel state
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [newKind, setNewKind] = useState<RouterProviderKind>("openrouter");
-  const [newName, setNewName] = useState("OpenRouter شخصی");
-  const [newBaseUrl, setNewBaseUrl] = useState("https://openrouter.ai/api/v1");
-  const [newApiKey, setNewApiKey] = useState("");
-  const [showNewKey, setShowNewKey] = useState(false);
-  const [isSavingProvider, setIsSavingProvider] = useState(false);
-
-  // Inline Key Update modal/inline state
-  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
-  const [editKeyValue, setEditKeyValue] = useState("");
-  const [editBaseUrlValue, setEditBaseUrlValue] = useState("");
-  const [editNameValue, setEditNameValue] = useState("");
-
-  // Provider busy state (test / discover)
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Live Catalog Modal state
   const [catalogProviderId, setCatalogProviderId] = useState<string | null>(null);
@@ -96,12 +101,7 @@ export function RouterSettingsView() {
   // Agent Chain Testing state
   const [testingAgentId, setTestingAgentId] = useState<StudioAgentId | null>(null);
   const [agentTestResults, setAgentTestResults] = useState<
-    Partial<
-      Record<
-        StudioAgentId,
-        { ok: boolean; text: string }
-      >
-    >
+    Partial<Record<StudioAgentId, { ok: boolean; text: string }>>
   >({});
 
   const loadRouterConfig = useCallback(async () => {
@@ -111,11 +111,10 @@ export function RouterSettingsView() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "خطا در دریافت تنظیمات روتر");
       setConfig(data.config);
-      setPresets(data.presets ?? []);
     } catch (err) {
       setBanner({
         type: "error",
-        text: err instanceof Error ? err.message : "خطا در بارگذاری روتر",
+        text: err instanceof Error ? err.message : "خطا در بارگذاری روتر مدل‌های رایگان",
       });
     } finally {
       setIsLoading(false);
@@ -123,10 +122,9 @@ export function RouterSettingsView() {
   }, []);
 
   useEffect(() => {
-    loadRouterConfig();
+    void loadRouterConfig();
   }, [loadRouterConfig]);
 
-  // All selectable active models across active providers for Combo Lists
   const activeModelOptions = useMemo(() => {
     if (!config) return [];
     const options: Array<{
@@ -150,61 +148,6 @@ export function RouterSettingsView() {
     return options;
   }, [config]);
 
-  const handleSelectPreset = (kind: RouterProviderKind) => {
-    setNewKind(kind);
-    const p = presets.find((item) => item.kind === kind);
-    if (p) {
-      setNewBaseUrl(p.defaultBaseUrl);
-      const shortLabel = p.label.split("(")[0].trim();
-      setNewName(shortLabel);
-    }
-  };
-
-  const handleCreateProvider = async (autoDiscoverWorking: boolean) => {
-    if (!newName.trim()) {
-      setBanner({ type: "error", text: "لطفاً یک نام برای حساب سرویس‌دهنده وارد کنید." });
-      return;
-    }
-    if (!newApiKey.trim()) {
-      setBanner({ type: "error", text: "لطفاً کلید API را وارد کنید." });
-      return;
-    }
-    setIsSavingProvider(true);
-    setBanner(null);
-    try {
-      const res = await fetch("/api/router/providers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          kind: newKind,
-          name: newName.trim(),
-          baseUrl: newBaseUrl.trim(),
-          apiKey: newApiKey.trim(),
-          enabled: true,
-          autoDiscoverWorking,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "ثبت حساب ناموفق بود.");
-      setConfig(data.config);
-      setShowAddForm(false);
-      setNewApiKey("");
-      setBanner({
-        type: "ok",
-        text:
-          data.discoveryMessage ||
-          "حساب جدید با موفقیت در سرور ذخیره شد.",
-      });
-    } catch (err) {
-      setBanner({
-        type: "error",
-        text: err instanceof Error ? err.message : "خطا در افزودن سرویس‌دهنده",
-      });
-    } finally {
-      setIsSavingProvider(false);
-    }
-  };
-
   const handleToggleProviderEnabled = async (provider: RouterProviderAccount) => {
     try {
       const res = await fetch(`/api/router/providers/${provider.id}`, {
@@ -223,54 +166,6 @@ export function RouterSettingsView() {
     }
   };
 
-  const handleSaveProviderEdit = async (providerId: string) => {
-    setBusyProviderId(providerId);
-    setBanner(null);
-    try {
-      const res = await fetch(`/api/router/providers/${providerId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: editNameValue.trim() || undefined,
-          baseUrl: editBaseUrlValue.trim() || undefined,
-          apiKey: editKeyValue.trim() || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "بروزرسانی حساب ناموفق بود.");
-      setConfig(data.config);
-      setEditingProviderId(null);
-      setEditKeyValue("");
-      setBanner({ type: "ok", text: "تنظیمات حساب با موفقیت بروزرسانی شد." });
-    } catch (err) {
-      setBanner({
-        type: "error",
-        text: err instanceof Error ? err.message : "خطا در ویرایش حساب",
-      });
-    } finally {
-      setBusyProviderId(null);
-    }
-  };
-
-  const handleDeleteProvider = async (providerId: string) => {
-    setBusyProviderId(providerId);
-    try {
-      const res = await fetch(`/api/router/providers/${providerId}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "حذف انجام نشد.");
-      setConfig(data.config);
-      setConfirmDeleteId(null);
-      setBanner({ type: "ok", text: "حساب سرویس‌دهنده حذف شد." });
-    } catch (err) {
-      setBanner({
-        type: "error",
-        text: err instanceof Error ? err.message : "خطا در حذف حساب",
-      });
-    } finally {
-      setBusyProviderId(null);
-    }
-  };
-
   const handleTestProvider = async (providerId: string) => {
     setBusyProviderId(providerId);
     setBanner(null);
@@ -280,7 +175,7 @@ export function RouterSettingsView() {
       if (data.config) setConfig(data.config);
       setBanner({
         type: data.ok ? "ok" : "error",
-        text: data.message || (data.ok ? "ارتباط برقرار است." : "تست ناموفق بود."),
+        text: data.message || (data.ok ? "ارتباط سرور برقرار است." : "تست ناموفق بود."),
       });
     } catch (err) {
       setBanner({
@@ -305,7 +200,7 @@ export function RouterSettingsView() {
         body: JSON.stringify({ mode }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "دریافت مدل‌ها ناموفق بود.");
+      if (!res.ok) throw new Error(data.error || "دریافت مدل‌های رایگان ناموفق بود.");
       setConfig(data.config);
       if (mode === "catalog") {
         setCatalogProviderId(providerId);
@@ -321,7 +216,7 @@ export function RouterSettingsView() {
     } catch (err) {
       setBanner({
         type: "error",
-        text: err instanceof Error ? err.message : "خطا در دریافت لیست مدل‌ها",
+        text: err instanceof Error ? err.message : "خطا در دریافت کاتالوگ مدل‌ها",
       });
     } finally {
       setBusyProviderId(null);
@@ -352,13 +247,13 @@ export function RouterSettingsView() {
       const res = await fetch(`/api/router/providers/${providerId}/models/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId: manualModelId.trim() }),
+        body: JSON.stringify({ modelId: manualModelId.trim(), isFree: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "افزودن مدل انجام نشد.");
       setConfig(data.config);
       setManualModelId("");
-      setBanner({ type: "ok", text: "مدل دلخواه به لیست فعال اضافه شد." });
+      setBanner({ type: "ok", text: "مدل به لیست فعال اضافه شد." });
     } catch (err) {
       setBanner({
         type: "error",
@@ -428,7 +323,7 @@ export function RouterSettingsView() {
     if (!config || activeModelOptions.length === 0) {
       setBanner({
         type: "error",
-        text: "ابتدا در بخش «حساب‌های API و مدل‌ها» حداقل یک مدل را فعال کنید.",
+        text: "هیچ مدل فعالی یافت نشد؛ ابتدا یک سرویس متصل در سرور را فعال کنید.",
       });
       return;
     }
@@ -473,7 +368,7 @@ export function RouterSettingsView() {
       await loadRouterConfig();
       setBanner({
         type: "ok",
-        text: "زنجیره مدل اصلی و جایگزین‌ها با موفقیت روی همه ۴ ایجنت اعمال شد.",
+        text: "زنجیره مدل‌های رایگان با موفقیت روی تمام هسته‌های هر ۲ ابر-ایجنت اعمال شد.",
       });
     } catch {
       setBanner({ type: "error", text: "اعمال همگانی با خطا مواجه شد." });
@@ -490,7 +385,7 @@ export function RouterSettingsView() {
         [agentId]: {
           ok: Boolean(data.ok),
           text: data.ok
-            ? `متصل شد: ${data.usedProvider} · ${data.usedModel} (${data.latencyMs}ms)`
+            ? `پاسخگو: ${data.usedProvider} · ${data.usedModel} (${data.latencyMs}ms)`
             : data.error || "تست ناموفق بود",
         },
       }));
@@ -525,683 +420,483 @@ export function RouterSettingsView() {
     });
   }, [catalogProvider, catalogSearch, catalogFilter]);
 
-  if (isLoading || !config) {
-    return (
-      <div className="mx-auto max-w-4xl space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-8">
-        <div className="h-6 w-56 animate-pulse rounded bg-[#1B1F2A]" />
-        <div className="h-32 animate-pulse rounded-xl bg-[#1B1F2A]" />
-        <div className="h-32 animate-pulse rounded-xl bg-[#1B1F2A]" />
-      </div>
-    );
-  }
-
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
-      {/* Calm Header & Simple 2-Tab Switcher */}
+    <div className="mx-auto max-w-5xl space-y-6">
+      {/* Top Mode Switcher: Projects & Desktop Bundle vs. 100% Free Multi-Model Router */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5">
         <div>
-          <h1 className="text-lg font-bold text-slate-100">روتر هوشمند مدل‌ها و آداپتور API</h1>
+          <h1 className="text-lg font-bold text-slate-100">
+            آرشیو پروژه‌ها، بسته نصبی ویندوز و روتر ۱۰۰٪ رایگان مدل‌ها
+          </h1>
           <p className="mt-1 text-xs leading-6 text-slate-400">
-            حساب‌های OpenRouter، Groq، گوگل یا هر سرویس سازگار دیگری را متصل کنید و برای هر ایجنت مدل اصلی و جایگزین (فالبک) بچینید.
+            مدیریت پست‌های ساخته‌شده، دانلود نسخه دسکتاپ آفلاین (مجهز به کلون صدای XTTS-v2) و چیدمان زنجیره فالبک مدل‌های رایگان سرور.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 rounded-xl border border-[#262B38] bg-[#0B0D11] p-1">
+        <div className="flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] p-1">
           <button
             type="button"
-            onClick={() => setSubTab("agents")}
-            className={`rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
-              subTab === "agents"
+            onClick={() => setTopSection("projects")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              topSection === "projects"
                 ? "bg-amber-500 text-slate-950"
                 : "text-slate-300 hover:text-white"
             }`}
           >
-            ۱. اتصال مدل به ایجنت‌ها ({AGENT_META.length})
+            <FolderOpen className="h-3.5 w-3.5" />
+            <span>پروژه‌ها و نسخه دسکتاپ ({projects.length})</span>
           </button>
           <button
             type="button"
-            onClick={() => setSubTab("providers")}
-            className={`rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
-              subTab === "providers"
+            onClick={() => setTopSection("router")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              topSection === "router"
                 ? "bg-amber-500 text-slate-950"
                 : "text-slate-300 hover:text-white"
             }`}
           >
-            ۲. حساب‌های API و مدل‌ها ({config.providers.length})
+            <Server className="h-3.5 w-3.5" />
+            <span>روتر مدل‌های رایگان سرور</span>
           </button>
         </div>
       </div>
 
-      {/* Feedback Banner */}
-      {banner && (
-        <div
-          className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs ${
-            banner.type === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-              : "border-red-500/40 bg-red-500/10 text-red-200"
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            {banner.type === "ok" ? (
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-            ) : (
-              <XCircle className="h-4 w-4 shrink-0 text-red-400" />
-            )}
-            <span className="leading-6">{banner.text}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setBanner(null)}
-            className="text-slate-300 underline hover:text-white"
-          >
-            بستن
-          </button>
-        </div>
-      )}
-
-      {/* TAB 1: Agent Combo List & Fallback Priority */}
-      {subTab === "agents" ? (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#14171F]/70 px-4 py-3 text-xs text-slate-300">
-            <span>
-              در صورت خطا یا اتمام سهمیه «مدل اصلی»، ایجنت به‌صورت خودکار سراغ «جایگزین ۱» و سپس «جایگزین ۲» می‌رود.
-            </span>
-            <button
-              type="button"
-              onClick={handleApplyChainToAllAgents}
-              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20"
-            >
-              اعمال زنجیره سناریونویس روی همه ایجنت‌ها
-            </button>
-          </div>
-
-          {AGENT_META.map((agent) => {
-            const chain = config.agentRoutes[agent.id] ?? [];
-            const testResult = agentTestResults[agent.id];
-
-            return (
-              <div
-                key={agent.id}
-                className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-bold text-slate-100">{agent.title}</h2>
-                    <p className="mt-0.5 text-xs text-slate-400">{agent.subtitle}</p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      disabled={testingAgentId === agent.id}
-                      onClick={() => handleTestAgentChain(agent.id)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-amber-500/50 hover:text-amber-300 disabled:opacity-50"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      <span>{testingAgentId === agent.id ? "در حال تست..." : "تست زنجیره"}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleAddFallbackSlot(agent.id)}
-                      className="inline-flex items-center gap-1 rounded-lg bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/25"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      <span>افزودن جایگزین (فالبک)</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Ordered Combo List */}
-                <div className="space-y-2.5">
-                  {chain.map((target, idx) => {
-                    const currentVal = `${target.providerId}::${target.modelId}`;
-                    const existsInActive = activeModelOptions.some((o) => o.value === currentVal);
-
-                    return (
-                      <div
-                        key={`${agent.id}_${idx}_${currentVal}`}
-                        className="flex flex-wrap items-center gap-2 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 p-2.5"
-                      >
-                        <span
-                          className={`min-w-[92px] rounded-lg px-2.5 py-1.5 text-center text-[11px] font-semibold ${
-                            idx === 0
-                              ? "bg-amber-500 text-slate-950"
-                              : "bg-[#1B1F2A] text-slate-300"
-                          }`}
-                        >
-                          {idx === 0 ? "مدل اصلی" : `جایگزین ${idx}`}
-                        </span>
-
-                        <select
-                          value={currentVal}
-                          onChange={(e) => handleAgentTargetChange(agent.id, idx, e.target.value)}
-                          className="min-w-[240px] flex-1 rounded-lg border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
-                        >
-                          {!existsInActive && (
-                            <option value={currentVal}>
-                              {target.modelId} (سرویس یا مدل غیرفعال)
-                            </option>
-                          )}
-                          {activeModelOptions.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
-
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            disabled={idx === 0}
-                            onClick={() => handleMoveSlot(agent.id, idx, -1)}
-                            title="افزایش اولویت"
-                            className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-300 hover:text-white disabled:opacity-30"
-                          >
-                            <ArrowUp className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={idx === chain.length - 1}
-                            onClick={() => handleMoveSlot(agent.id, idx, 1)}
-                            title="کاهش اولویت"
-                            className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-300 hover:text-white disabled:opacity-30"
-                          >
-                            <ArrowDown className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={chain.length <= 1}
-                            onClick={() => handleRemoveSlot(agent.id, idx)}
-                            title="حذف از زنجیره"
-                            className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-400 hover:text-red-400 disabled:opacity-30"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {testResult && (
-                  <div
-                    className={`rounded-lg px-3 py-2 text-xs ${
-                      testResult.ok
-                        ? "bg-emerald-500/10 text-emerald-300"
-                        : "bg-red-500/10 text-red-300"
-                    }`}
-                  >
-                    {testResult.text}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+      {topSection === "projects" ? (
+        <ProjectsAndDesktopView
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          firebaseUser={firebaseUser}
+          cloudProjectCount={cloudProjectCount}
+          onGoogleSignIn={onGoogleSignIn}
+          onGoogleSignOut={onGoogleSignOut}
+          onOpenProject={onOpenProject}
+          onDeleteProject={onDeleteProject}
+          onExportMarkdown={onExportMarkdown}
+          onExportJson={onExportJson}
+        />
+      ) : isLoading || !config ? (
+        <div className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-8">
+          <div className="h-6 w-56 animate-pulse rounded bg-[#1B1F2A]" />
+          <div className="h-32 animate-pulse rounded-xl bg-[#1B1F2A]" />
         </div>
       ) : (
-        /* TAB 2: Provider Accounts, Key Auto-Discovery & Live Site Catalog */
-        <div className="space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-xs text-slate-400">
-              تمامی کلیدهای API به‌صورت امن در سرور نگهداری می‌شوند و به مرورگر ارسال نمی‌گردند.
+        <div className="space-y-5">
+          {/* Sub-navigation inside Free Router */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#14171F] px-4 py-3">
+            <div className="flex items-center gap-2 text-xs text-emerald-300">
+              <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" />
+              <span>
+                امنیت کامل: هیچ کلیدی در مرورگر دریافت یا ذخیره نمی‌شود؛ همه متغیرها مستقیم از محیط سرور (
+                <code className="font-mono-tabular text-slate-200">.env</code>) خوانده می‌شوند.
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowAddForm((prev) => !prev)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400"
-            >
-              <Plus className="h-4 w-4" />
-              <span>{showAddForm ? "بستن فرم افزودن" : "افزودن حساب یا سرویس جدید"}</span>
-            </button>
+
+            <div className="flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] p-1">
+              <button
+                type="button"
+                onClick={() => setSubTab("agents")}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  subTab === "agents"
+                    ? "bg-amber-500 text-slate-950"
+                    : "text-slate-300 hover:text-white"
+                }`}
+              >
+                زنجیره فالبک ایجنت‌ها
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab("providers")}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  subTab === "providers"
+                    ? "bg-amber-500 text-slate-950"
+                    : "text-slate-300 hover:text-white"
+                }`}
+              >
+                وضعیت سرویس‌های رایگان سرور ({config.providers.length})
+              </button>
+            </div>
           </div>
 
-          {/* Add New Account Drawer */}
-          {showAddForm && (
-            <div className="space-y-4 rounded-2xl border border-amber-500/40 bg-[#14171F] p-5">
-              <div className="text-sm font-bold text-slate-100">اتصال حساب جدید هوش مصنوعی</div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    انتخاب سرویس‌دهنده
-                  </label>
-                  <select
-                    value={newKind}
-                    onChange={(e) => handleSelectPreset(e.target.value as RouterProviderKind)}
-                    className="w-full rounded-xl border border-[#262B38] bg-[#0B0D11] px-3 py-2.5 text-xs text-slate-100 outline-none focus:border-amber-500"
-                  >
-                    {presets.map((p) => (
-                      <option key={p.kind} value={p.kind}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    نام دلخواه حساب (برای نمایش در لیست‌ها)
-                  </label>
-                  <input
-                    type="text"
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="مثلاً OpenRouter رایگان من"
-                    className="w-full rounded-xl border border-[#262B38] bg-[#0B0D11] px-3 py-2.5 text-xs text-slate-100 outline-none focus:border-amber-500"
-                  />
-                </div>
+          {banner && (
+            <div
+              className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs ${
+                banner.type === "ok"
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                  : "border-red-500/40 bg-red-500/10 text-red-200"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {banner.type === "ok" ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                ) : (
+                  <XCircle className="h-4 w-4 shrink-0 text-red-400" />
+                )}
+                <span className="leading-6">{banner.text}</span>
               </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    کلید API
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showNewKey ? "text" : "password"}
-                      value={newApiKey}
-                      onChange={(e) => setNewApiKey(e.target.value)}
-                      dir="ltr"
-                      placeholder={
-                        presets.find((p) => p.kind === newKind)?.placeholderKey || "sk-..."
-                      }
-                      className="w-full rounded-xl border border-[#262B38] bg-[#0B0D11] px-3 py-2.5 pl-10 text-xs text-slate-100 outline-none focus:border-amber-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowNewKey((s) => !s)}
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    >
-                      {showNewKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
-                    آدرس پایه (Base URL)
-                  </label>
-                  <input
-                    type="text"
-                    dir="ltr"
-                    value={newBaseUrl}
-                    onChange={(e) => setNewBaseUrl(e.target.value)}
-                    placeholder="https://api.example.com/v1"
-                    className="w-full rounded-xl border border-[#262B38] bg-[#0B0D11] px-3 py-2.5 text-xs text-slate-100 outline-none focus:border-amber-500"
-                  />
-                </div>
-              </div>
-
-              <p className="text-[11px] text-slate-400">
-                {presets.find((p) => p.kind === newKind)?.hintFa}
-              </p>
-
-              <div className="flex flex-wrap items-center gap-3 pt-1">
-                <button
-                  type="button"
-                  disabled={isSavingProvider}
-                  onClick={() => handleCreateProvider(true)}
-                  className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-xs font-semibold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50"
-                >
-                  <Wand2 className="h-4 w-4" />
-                  <span>
-                    {isSavingProvider
-                      ? "در حال بررسی و یافتن مدل‌های پاسخگو..."
-                      : "ذخیره و افزودن خودکار مدل‌های پاسخگو با این کلید"}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  disabled={isSavingProvider}
-                  onClick={() => handleCreateProvider(false)}
-                  className="rounded-xl border border-[#262B38] bg-[#0B0D11] px-4 py-2.5 text-xs font-medium text-slate-200 hover:border-slate-500 disabled:opacity-50"
-                >
-                  فقط ذخیره حساب
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setBanner(null)}
+                className="text-slate-300 underline hover:text-white"
+              >
+                بستن
+              </button>
             </div>
           )}
 
-          {/* Connected Provider Cards */}
-          <div className="space-y-3">
-            {config.providers.map((provider) => {
-              const activeCount = provider.models.filter((m) => m.enabled).length;
-              const isBusy = busyProviderId === provider.id;
-              const isEditing = editingProviderId === provider.id;
-
-              return (
-                <div
-                  key={provider.id}
-                  className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5"
+          {subTab === "agents" ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#14171F]/70 px-4 py-3 text-xs text-slate-300">
+                <span>
+                  اگر سهمیه رایگان مدل اول موقتاً پر شود، روتر بدون توقف کار سراغ مدل جایگزین بعدی می‌رود.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleApplyChainToAllAgents}
+                  className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20 whitespace-nowrap shrink-0"
                 >
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <h3 className="text-sm font-bold text-slate-100">{provider.name}</h3>
-                        <span
-                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
-                            provider.hasApiKey
-                              ? "bg-emerald-500/15 text-emerald-300"
-                              : "bg-red-500/15 text-red-300"
-                          }`}
-                        >
-                          {provider.hasApiKey ? provider.maskedKey : "کلید ثبت نشده"}
-                        </span>
-                        <span className="rounded-md bg-[#0B0D11] px-2 py-0.5 text-[11px] text-amber-300">
-                          {activeCount} مدل فعال از {provider.models.length} مدل
-                        </span>
+                  کپی زنجیره اول روی همه هسته‌ها
+                </button>
+              </div>
+
+              {AGENT_META.map((agent) => {
+                const chain = config.agentRoutes[agent.id] ?? [];
+                const testResult = agentTestResults[agent.id];
+
+                return (
+                  <div
+                    key={agent.id}
+                    className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-medium text-amber-400">
+                          {agent.superAgentBadge}
+                        </div>
+                        <h2 className="text-sm font-bold text-slate-100">{agent.title}</h2>
+                        <p className="text-xs text-slate-400">{agent.subtitle}</p>
                       </div>
-                      <div dir="ltr" className="text-right text-[11px] text-slate-500">
-                        {provider.baseUrl || "سرویس استاندارد"}
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={testingAgentId === agent.id}
+                          onClick={() => handleTestAgentChain(agent.id)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-amber-500/50 hover:text-amber-300 disabled:opacity-50 whitespace-nowrap"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          <span>{testingAgentId === agent.id ? "در حال تست..." : "تست زنده"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAddFallbackSlot(agent.id)}
+                          className="inline-flex items-center gap-1 rounded-lg bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/25 whitespace-nowrap"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>افزودن مدل جایگزین</span>
+                        </button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="space-y-2.5">
+                      {chain.map((target, idx) => {
+                        const currentVal = `${target.providerId}::${target.modelId}`;
+                        const existsInActive = activeModelOptions.some(
+                          (o) => o.value === currentVal
+                        );
+
+                        return (
+                          <div
+                            key={`${agent.id}_${idx}_${currentVal}`}
+                            className="flex flex-wrap items-center gap-2 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 p-2.5"
+                          >
+                            <span
+                              className={`min-w-[92px] rounded-lg px-2.5 py-1.5 text-center text-[11px] font-semibold ${
+                                idx === 0
+                                  ? "bg-amber-500 text-slate-950"
+                                  : "bg-[#1B1F2A] text-slate-300"
+                              }`}
+                            >
+                              {idx === 0 ? "مدل اصلی" : `جایگزین ${idx}`}
+                            </span>
+
+                            <select
+                              value={currentVal}
+                              onChange={(e) =>
+                                handleAgentTargetChange(agent.id, idx, e.target.value)
+                              }
+                              className="min-w-[240px] flex-1 rounded-lg border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
+                            >
+                              {!existsInActive && (
+                                <option value={currentVal}>
+                                  {target.modelId} (نیازمند فعال‌سازی متغیر سرور)
+                                </option>
+                              )}
+                              {activeModelOptions.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={idx === 0}
+                                onClick={() => handleMoveSlot(agent.id, idx, -1)}
+                                title="افزایش اولویت"
+                                className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-300 hover:text-white disabled:opacity-30"
+                              >
+                                <ArrowUp className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={idx === chain.length - 1}
+                                onClick={() => handleMoveSlot(agent.id, idx, 1)}
+                                title="کاهش اولویت"
+                                className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-300 hover:text-white disabled:opacity-30"
+                              >
+                                <ArrowDown className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={chain.length <= 1}
+                                onClick={() => handleRemoveSlot(agent.id, idx)}
+                                title="حذف از زنجیره"
+                                className="rounded-lg border border-[#262B38] bg-[#14171F] p-1.5 text-slate-400 hover:text-red-400 disabled:opacity-30"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {testResult && (
+                      <div
+                        className={`rounded-lg px-3 py-2 text-xs ${
+                          testResult.ok
+                            ? "bg-emerald-500/10 text-emerald-300"
+                            : "bg-red-500/10 text-red-300"
+                        }`}
+                      >
+                        {testResult.text}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* Server-Env Providers Status & Free Model Discovery (Zero Client Key Inputs) */
+            <div className="space-y-3">
+              {config.providers.map((provider) => {
+                const activeCount = provider.models.filter((m) => m.enabled).length;
+                const isBusy = busyProviderId === provider.id;
+
+                return (
+                  <div
+                    key={provider.id}
+                    className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <h3 className="text-sm font-bold text-slate-100">{provider.name}</h3>
+                          <span aria-hidden="true" className="text-slate-600">·</span>
+                          <span
+                            className={
+                              provider.hasApiKey ? "text-emerald-400" : "text-slate-400"
+                            }
+                          >
+                            {provider.maskedKey}
+                          </span>
+                          <span aria-hidden="true" className="text-slate-600">·</span>
+                          <span className="font-mono-tabular text-amber-300">
+                            {activeCount} مدل فعال از {provider.models.length}
+                          </span>
+                        </div>
+                        <div dir="ltr" className="text-right text-[11px] text-slate-500">
+                          {provider.baseUrl || "Google GenAI Native SDK"}
+                        </div>
+                      </div>
+
                       <button
                         type="button"
                         onClick={() => handleToggleProviderEnabled(provider)}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                        className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                           provider.enabled
                             ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
                             : "bg-slate-700/40 text-slate-400 hover:text-slate-200"
                         }`}
                       >
-                        {provider.enabled ? "روشن" : "خاموش"}
+                        {provider.enabled ? "فعال در زنجیره" : "غیرفعال"}
+                      </button>
+                    </div>
+
+                    {provider.lastTestMessage && (
+                      <div
+                        className={`rounded-lg px-3 py-2 text-xs ${
+                          provider.lastTestStatus === "error"
+                            ? "bg-red-500/10 text-red-300"
+                            : "bg-[#0B0D11]/70 text-slate-300"
+                        }`}
+                      >
+                        {provider.lastTestMessage}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        disabled={isBusy || !provider.hasApiKey}
+                        onClick={() => handleDiscoverProvider(provider.id, "auto_working")}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500/15 px-3.5 py-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/25 disabled:opacity-40 whitespace-nowrap"
+                      >
+                        <Wand2 className="h-3.5 w-3.5" />
+                        <span>
+                          {isBusy ? "در حال بررسی..." : "یافتن خودکار مدل‌های رایگان پاسخگو"}
+                        </span>
                       </button>
 
-                      {provider.id !== "google_default" &&
-                        (confirmDeleteId === provider.id ? (
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteProvider(provider.id)}
-                              className="rounded-lg bg-red-500 px-2.5 py-1.5 text-[11px] font-semibold text-white"
-                            >
-                              تایید حذف
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteId(null)}
-                              className="rounded-lg bg-[#0B0D11] px-2.5 py-1.5 text-[11px] text-slate-300"
-                            >
-                              انصراف
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteId(provider.id)}
-                            className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-1.5 text-slate-400 hover:text-red-400"
-                            title="حذف حساب"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        ))}
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handleDiscoverProvider(provider.id, "catalog")}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-amber-500/50 hover:text-amber-300 disabled:opacity-40 whitespace-nowrap"
+                      >
+                        <ListFilter className="h-3.5 w-3.5" />
+                        <span>مدیریت لیست مدل‌ها</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isBusy || !provider.hasApiKey}
+                        onClick={() => handleTestProvider(provider.id)}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-40 whitespace-nowrap"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${isBusy ? "animate-spin" : ""}`} />
+                        <span>تست سلامت ارتباط</span>
+                      </button>
                     </div>
                   </div>
-
-                  {provider.lastTestMessage && (
-                    <div
-                      className={`rounded-lg px-3 py-2 text-xs ${
-                        provider.lastTestStatus === "error"
-                          ? "bg-red-500/10 text-red-300"
-                          : "bg-[#0B0D11]/70 text-slate-300"
-                      }`}
-                    >
-                      {provider.lastTestMessage}
-                    </div>
-                  )}
-
-                  {/* Clean Action Row */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleDiscoverProvider(provider.id, "auto_working")}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500/15 px-3.5 py-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/25 disabled:opacity-50"
-                    >
-                      <Wand2 className="h-3.5 w-3.5" />
-                      <span>
-                        {isBusy ? "در حال بررسی..." : "افزودن خودکار مدل‌های پاسخگو"}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleDiscoverProvider(provider.id, "catalog")}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-amber-500/50 hover:text-amber-300 disabled:opacity-50"
-                    >
-                      <ListFilter className="h-3.5 w-3.5" />
-                      <span>انتخاب از لیست به‌روز سایت</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleTestProvider(provider.id)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-50"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isBusy ? "animate-spin" : ""}`} />
-                      <span>تست ارتباط</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isEditing) {
-                          setEditingProviderId(null);
-                        } else {
-                          setEditingProviderId(provider.id);
-                          setEditNameValue(provider.name);
-                          setEditBaseUrlValue(provider.baseUrl);
-                          setEditKeyValue("");
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-300 hover:text-white"
-                    >
-                      <KeyRound className="h-3.5 w-3.5" />
-                      <span>ویرایش کلید / آدرس</span>
-                    </button>
-                  </div>
-
-                  {/* Inline Edit Key Drawer */}
-                  {isEditing && (
-                    <div className="space-y-3 rounded-xl border border-[#262B38] bg-[#0B0D11]/90 p-4">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <input
-                          type="text"
-                          value={editNameValue}
-                          onChange={(e) => setEditNameValue(e.target.value)}
-                          placeholder="نام حساب"
-                          className="rounded-lg border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
-                        />
-                        <input
-                          type="text"
-                          dir="ltr"
-                          value={editBaseUrlValue}
-                          onChange={(e) => setEditBaseUrlValue(e.target.value)}
-                          placeholder="Base URL"
-                          className="rounded-lg border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
-                        />
-                        <input
-                          type="password"
-                          dir="ltr"
-                          value={editKeyValue}
-                          onChange={(e) => setEditKeyValue(e.target.value)}
-                          placeholder="کلید API جدید (در صورت نیاز به تغییر)"
-                          className="rounded-lg border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
-                        />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => handleSaveProviderEdit(provider.id)}
-                          className="rounded-lg bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-amber-400"
-                        >
-                          ذخیره تغییرات
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingProviderId(null)}
-                          className="rounded-lg px-3 py-1.5 text-xs text-slate-400 hover:text-white"
-                        >
-                          انصراف
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Clean Focused Modal: Live Site Model Catalog Picker */}
+      {/* Live Model Catalog Modal */}
       {catalogProvider && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
-          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl border border-[#262B38] bg-[#14171F] shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
+          <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#262B38] bg-[#14171F]">
             <div className="flex items-center justify-between border-b border-[#262B38] px-5 py-4">
               <div>
                 <h3 className="text-sm font-bold text-slate-100">
-                  لیست به‌روز مدل‌های {catalogProvider.name}
+                  مدل‌های در دسترس — {catalogProvider.name}
                 </h3>
-                <p className="mt-0.5 text-[11px] text-slate-400">
-                  مدل‌های دلخواه را روشن یا خاموش کنید؛ مدل‌های روشن در کومبولیست ایجنت‌ها ظاهر می‌شوند.
+                <p className="mt-0.5 text-xs text-slate-400">
+                  مدل‌های رایگان دلخواه را روشن کنید تا در زنجیره فالبک ایجنت‌ها قرار بگیرند.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setCatalogProviderId(null)}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-[#1B1F2A] hover:text-white"
+                className="rounded-lg p-1.5 text-slate-400 hover:text-white"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            {/* Search & Filter Controls */}
-            <div className="flex flex-wrap items-center gap-3 border-b border-[#262B38] px-5 py-3">
-              <div className="relative min-w-[200px] flex-1">
-                <Search className="absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={catalogSearch}
-                  onChange={(e) => setCatalogSearch(e.target.value)}
-                  placeholder="جستجوی نام یا شناسه مدل..."
-                  className="w-full rounded-xl border border-[#262B38] bg-[#0B0D11] py-2 pr-9 pl-3 text-xs text-slate-100 outline-none focus:border-amber-500"
-                />
-              </div>
-
-              <div className="flex items-center gap-1 rounded-xl border border-[#262B38] bg-[#0B0D11] p-1 text-[11px]">
-                {[
-                  { id: "free", label: "رایگان‌ها" },
-                  { id: "enabled", label: "فعال‌های من" },
-                  { id: "all", label: "همه مدل‌ها" },
-                ].map((f) => (
+            <div className="space-y-3 border-b border-[#262B38] bg-[#0B0D11]/60 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    value={catalogSearch}
+                    onChange={(e) => setCatalogSearch(e.target.value)}
+                    placeholder="جستجوی نام یا شناسه مدل..."
+                    className="w-full rounded-xl border border-[#262B38] bg-[#14171F] py-2 pr-9 pl-3 text-xs text-slate-100 outline-none focus:border-amber-500"
+                  />
+                </div>
+                {(["free", "enabled", "all"] as const).map((flt) => (
                   <button
-                    key={f.id}
+                    key={flt}
                     type="button"
-                    onClick={() => setCatalogFilter(f.id as "all" | "free" | "enabled")}
-                    className={`rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
-                      catalogFilter === f.id
-                        ? "bg-amber-500 text-slate-950"
-                        : "text-slate-400 hover:text-white"
+                    onClick={() => setCatalogFilter(flt)}
+                    className={`rounded-lg px-3 py-2 text-xs font-medium whitespace-nowrap shrink-0 ${
+                      catalogFilter === flt
+                        ? "bg-amber-500 text-slate-950 font-semibold"
+                        : "border border-[#262B38] bg-[#14171F] text-slate-300"
                     }`}
                   >
-                    {f.label}
+                    {flt === "free" ? "فقط رایگان" : flt === "enabled" ? "فعال‌ها" : "همه"}
                   </button>
                 ))}
               </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={manualModelId}
+                  onChange={(e) => setManualModelId(e.target.value)}
+                  placeholder="افزودن دستی شناسه مدل (مثلاً gemini-2.5-flash)"
+                  className="flex-1 rounded-xl border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAddManualModel(catalogProvider.id)}
+                  className="rounded-xl bg-amber-500/20 px-3.5 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/30 whitespace-nowrap shrink-0"
+                >
+                  افزودن مدل
+                </button>
+              </div>
             </div>
 
-            {/* Model Rows */}
-            <div className="flex-1 space-y-2 overflow-y-auto p-5">
-              {filteredCatalogModels.length === 0 ? (
-                <div className="py-10 text-center text-xs text-slate-400">
-                  مدلی با این فیلتر یافت نشد. فیلتر را روی «همه مدل‌ها» بگذارید یا نام مدل دلخواه را در کادر پایین اضافه کنید.
-                </div>
-              ) : (
-                filteredCatalogModels.map((m: RouterModelEntry) => {
-                  const isTesting = testingModelKey === `${catalogProvider.id}::${m.id}`;
-                  return (
-                    <div
-                      key={m.id}
-                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 px-3.5 py-2.5"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="truncate text-xs font-semibold text-slate-100">
-                            {m.name}
-                          </span>
-                          {m.isFree && (
-                            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
-                              رایگان
-                            </span>
-                          )}
-                          {m.lastTestedOk === true && (
-                            <span className="text-[10px] text-emerald-400">
-                              پاسخگو ({m.lastLatencyMs}ms)
-                            </span>
-                          )}
-                          {m.lastTestedOk === false && (
-                            <span className="text-[10px] text-red-400">خطا در تست</span>
-                          )}
-                        </div>
-                        <div dir="ltr" className="truncate text-right text-[11px] text-slate-500">
-                          {m.id}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={isTesting}
-                          onClick={() => handleTestSingleModel(catalogProvider.id, m.id)}
-                          className="rounded-lg border border-[#262B38] bg-[#14171F] px-2.5 py-1.5 text-[11px] text-slate-300 hover:border-amber-500/50 hover:text-amber-300 disabled:opacity-50"
-                        >
-                          {isTesting ? "تست..." : "تست"}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleToggleModel(catalogProvider.id, m.id, !m.enabled)
-                          }
-                          className={`min-w-[70px] rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-                            m.enabled
-                              ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
-                              : "bg-[#1B1F2A] text-slate-300 hover:text-white"
-                          }`}
-                        >
-                          {m.enabled ? "فعال ✓" : "افزودن +"}
-                        </button>
+            <div className="flex-1 divide-y divide-[#262B38] overflow-y-auto p-4">
+              {filteredCatalogModels.map((m) => {
+                const testKey = `${catalogProvider.id}::${m.id}`;
+                return (
+                  <div
+                    key={m.id}
+                    className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-semibold text-slate-100">{m.name}</div>
+                      <div dir="ltr" className="truncate text-right text-[11px] text-slate-500">
+                        {m.id}
                       </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
 
-            {/* Manual Model Add Footer */}
-            <div className="flex flex-wrap items-center gap-2 border-t border-[#262B38] px-5 py-3.5">
-              <input
-                type="text"
-                dir="ltr"
-                value={manualModelId}
-                onChange={(e) => setManualModelId(e.target.value)}
-                placeholder="افزودن دستی شناسه مدل (مثلاً: meta-llama/llama-3.3-70b-instruct:free)"
-                className="min-w-[240px] flex-1 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500"
-              />
-              <button
-                type="button"
-                onClick={() => handleAddManualModel(catalogProvider.id)}
-                className="rounded-xl bg-amber-500 px-3.5 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400"
-              >
-                افزودن مدل
-              </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {catalogProvider.hasApiKey && (
+                        <button
+                          type="button"
+                          disabled={testingModelKey === testKey}
+                          onClick={() => handleTestSingleModel(catalogProvider.id, m.id)}
+                          className="rounded-lg border border-[#262B38] bg-[#0B0D11] px-2.5 py-1 text-[11px] text-slate-300 hover:text-amber-300"
+                        >
+                          {testingModelKey === testKey ? "..." : "تست"}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleToggleModel(catalogProvider.id, m.id, !m.enabled)}
+                        className={`rounded-lg px-3 py-1 text-[11px] font-semibold ${
+                          m.enabled
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : "bg-[#0B0D11] text-slate-400"
+                        }`}
+                      >
+                        {m.enabled ? "فعال" : "غیرفعال"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

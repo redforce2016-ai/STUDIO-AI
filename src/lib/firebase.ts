@@ -23,7 +23,7 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
-import type { ProjectRecord, StudioMediaAsset } from "../types/studio";
+import type { PipelineStage, ProjectRecord } from "../types/studio";
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -83,7 +83,6 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Mandatory boot-time Firestore connection probe
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, "test", "connection"));
@@ -95,7 +94,7 @@ async function testConnection() {
 }
 void testConnection();
 
-const VALID_ID_REGEX = /^[a-zA-Z0-9_\-]+$/;
+const VALID_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 function clampStr(val: string | undefined | null, maxLen: number): string {
   if (!val) return "";
@@ -103,8 +102,30 @@ function clampStr(val: string | undefined | null, maxLen: number): string {
 }
 
 function sanitizeId(id: string): string {
-  const cleaned = id.replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 128);
+  const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
   return VALID_ID_REGEX.test(cleaned) && cleaned.length > 0 ? cleaned : `id_${Date.now()}`;
+}
+
+function mapStageForFirestoreRules(
+  stage: PipelineStage
+): "input" | "research_script" | "voiceover" | "director" | "visuals" | "completed" {
+  switch (stage) {
+    case "input":
+      return "input";
+    case "research_script":
+      return "research_script";
+    case "narration":
+    case "voiceover":
+      return "voiceover";
+    case "director":
+      return "director";
+    case "shot_videos":
+    case "davinci":
+    case "visuals":
+      return "visuals";
+    case "completed":
+      return "completed";
+  }
 }
 
 export function subscribeAuthState(callback: (user: User | null) => void): Unsubscribe {
@@ -185,14 +206,17 @@ export async function syncProjectToFirestore(uid: string, project: ProjectRecord
   try {
     const existingSnap = await getDoc(docRef);
     const stageFields = {
-      currentStage: project.currentStage,
+      currentStage: mapStageForFirestoreRules(project.currentStage),
       checkpointStatus: project.checkpointStatus,
       videoTitle: clampStr(project.researchScript?.videoTitle, 250),
       researchSummary: clampStr(project.researchScript?.researchSummary, 10000),
       scriptHook: clampStr(project.researchScript?.hook, 2000),
       scriptBody: clampStr(project.researchScript?.body, 15000),
       scriptCta: clampStr(project.researchScript?.cta, 2000),
-      narrationText: clampStr(project.voiceover?.narrationText, 15000),
+      narrationText: clampStr(
+        project.narration?.vocalizedNarrationText || project.voiceover?.narrationText,
+        15000
+      ),
       shotsCount: Math.min(30, Math.max(0, project.director?.shots.length ?? 0)),
       updatedAt: serverTimestamp(),
     };
@@ -206,20 +230,21 @@ export async function syncProjectToFirestore(uid: string, project: ProjectRecord
         idea: clampStr(project.brief.idea, 5000) || "-",
         platform: project.brief.platform,
         tone: project.brief.tone,
-        targetDurationSeconds: Math.min(1800, Math.max(10, Math.round(project.brief.targetDurationSeconds || 45))),
+        targetDurationSeconds: Math.min(
+          1800,
+          Math.max(10, Math.round(project.brief.targetDurationSeconds || 35))
+        ),
         ...stageFields,
         createdAt: serverTimestamp(),
       });
     } else {
       const existingData = existingSnap.data();
       if (existingData?.currentStage === "completed") {
-        // Terminal state locked by Firestore rules
         return;
       }
       await updateDoc(docRef, stageFields);
     }
 
-    // Sync shots subcollection if director shots exist and project isn't locked
     if (project.director?.shots?.length) {
       for (const shot of project.director.shots.slice(0, 30)) {
         const shotId = sanitizeId(`shot_${shot.shotNumber}`);
@@ -274,49 +299,6 @@ export async function deleteProjectFromFirestore(projectIdRaw: string): Promise<
   }
 }
 
-export async function syncMediaAssetToFirestore(uid: string, asset: StudioMediaAsset): Promise<void> {
-  const assetId = sanitizeId(asset.id);
-  const ownerId = sanitizeId(uid);
-  const path = `mediaLibrary/${assetId}`;
-  const ref = doc(db, "mediaLibrary", assetId);
-
-  try {
-    const snap = await getDoc(ref);
-    const mutableFields = {
-      title: clampStr(asset.title, 200) || "دارایی استودیو",
-      prompt: clampStr(asset.prompt, 3000),
-      mediaUrl: clampStr(asset.mediaUrl, 500),
-      aspectRatio: clampStr(asset.aspectRatio, 20),
-      transcriptText: clampStr(asset.transcriptText, 20000),
-      updatedAt: serverTimestamp(),
-    };
-    if (!snap.exists()) {
-      await setDoc(ref, {
-        id: assetId,
-        ownerId,
-        kind: asset.kind,
-        modelUsed: clampStr(asset.modelUsed, 80) || "gemini",
-        ...mutableFields,
-        createdAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(ref, mutableFields);
-    }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, path);
-  }
-}
-
-export async function deleteMediaAssetFromFirestore(assetIdRaw: string): Promise<void> {
-  const assetId = sanitizeId(assetIdRaw);
-  const path = `mediaLibrary/${assetId}`;
-  try {
-    await deleteDoc(doc(db, "mediaLibrary", assetId));
-  } catch (err) {
-    handleFirestoreError(err, OperationType.DELETE, path);
-  }
-}
-
 export interface CloudProjectSummary {
   id: string;
   title: string;
@@ -343,42 +325,6 @@ export function subscribeUserCloudProjects(
           platform: String(data.platform || "reels"),
           currentStage: String(data.currentStage || "input"),
           shotsCount: typeof data.shotsCount === "number" ? data.shotsCount : 0,
-        };
-      });
-      onData(items);
-    },
-    (error) => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, path);
-      } catch (wrapped) {
-        if (onError && wrapped instanceof Error) onError(wrapped);
-      }
-    }
-  );
-}
-
-export function subscribeUserMediaLibrary(
-  uid: string,
-  onData: (items: StudioMediaAsset[]) => void,
-  onError?: (err: Error) => void
-): Unsubscribe {
-  const path = "mediaLibrary";
-  const q = query(collection(db, path), where("ownerId", "==", sanitizeId(uid)));
-  return onSnapshot(
-    q,
-    (snapshot) => {
-      const items: StudioMediaAsset[] = snapshot.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: String(data.id || d.id),
-          kind: (data.kind as StudioMediaAsset["kind"]) || "image",
-          title: String(data.title || ""),
-          prompt: String(data.prompt || ""),
-          mediaUrl: data.mediaUrl ? String(data.mediaUrl) : null,
-          aspectRatio: String(data.aspectRatio || "16:9"),
-          modelUsed: String(data.modelUsed || ""),
-          transcriptText: data.transcriptText ? String(data.transcriptText) : undefined,
-          createdAt: new Date().toISOString(),
         };
       });
       onData(items);

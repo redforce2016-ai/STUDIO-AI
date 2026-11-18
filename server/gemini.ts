@@ -1,23 +1,42 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import path from "node:path";
 import type {
+  AgentSuperRole,
+  CompetitorViralReport,
   ContentFormatOption,
+  DirectingCrewNotes,
   DirectorOutput,
   DirectorShot,
   GroundedSource,
+  LocalVideoEngineId,
+  NarrationScriptOutput,
   PageMaturityOption,
+  PageProfile,
   PlatformOption,
   ProjectBrief,
   ResearchAndScriptOutput,
   ToneOption,
   TopicAnalysisResponse,
-  ViralTopicProposal,
   VisualAssetShot,
   VoicePersona,
   VoiceoverOutput,
 } from "../src/types/studio.js";
+import { compileAgentMemoryPromptBlock, normalizeDirectorShots3To8s } from "./agentMemory.js";
+import { renderHyperFramesDualKeyframes } from "./localVideoEngines.js";
+import {
+  auditDirectorCrewPlan,
+  auditNarrationOutput,
+  auditScenarioOutput,
+  auditVoiceoverAudioWav,
+  runMultimodalVisionFrameQA,
+} from "./qualityAssurance.js";
 import { executeAgentJsonWithRouter, getGoogleApiKeyFromRouter } from "./router.js";
-import { saveAudioFile, saveImageFile, saveVideoFile, saveVisualSvgFile } from "./store.js";
-import { executeAgentWebResearchMission } from "./agentBrowser.js";
+import {
+  getAudioDir,
+  getPageProfile,
+  listAgentMemories,
+  saveAudioFile,
+} from "./store.js";
 
 function getClient(apiVersion: "v1beta" | "v1alpha" | "v1" = "v1beta"): GoogleGenAI {
   const apiKey = getGoogleApiKeyFromRouter();
@@ -81,10 +100,10 @@ export function formatGeminiError(err: unknown): string {
     return msg;
   }
   if (isQuotaError(err)) {
-    return "سهمیه رایگان درخواست‌های روزانه Gemini پر شده است (خطای 429). می‌توانید از بخش «روتر مدل‌ها» کلید OpenRouter، Groq یا سرویس دیگری اضافه کرده و به ایجنت‌ها متصل کنید.";
+    return "سهمیه رایگان درخواست‌های روزانه Gemini پر شده است (خطای 429). می‌توانید از تب «روتر رایگان و دسکتاپ» مدل‌های رایگان جایگزین را فعال کنید.";
   }
   if (msg.includes("PERMISSION_DENIED") || msg.includes("API_KEY_INVALID") || msg.includes("403")) {
-    return "کلید API معتبر نیست یا دسترسی کافی ندارد. لطفاً کلید خود را در بخش «روتر مدل‌ها» بررسی کنید.";
+    return "کلید محیطی سرور معتبر نیست یا دسترسی کافی ندارد. لطفاً متغیرهای محیطی سرور را بررسی کنید.";
   }
   return msg;
 }
@@ -105,10 +124,6 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 1): Promise<T> {
   throw lastError;
 }
 
-/**
- * Calls primary text model ('gemini-4-hydrogen') and automatically falls back
- * to 'gemini-3.1-flash-lite' when daily free-tier quota on hydrogen is exhausted.
- */
 async function generateWithModelFallback(
   ai: GoogleGenAI,
   params: {
@@ -140,12 +155,12 @@ async function generateWithModelFallback(
 
 function clampDuration(val: unknown, format?: ContentFormatOption): number {
   const num = Number(val);
-  if (Number.isFinite(num) && num >= 10 && num <= 1800) {
+  if (Number.isFinite(num) && num >= 12 && num <= 1800) {
     return Math.round(num);
   }
   if (format === "story") return 20;
   if (format === "long_video") return 240;
-  return 45;
+  return 35;
 }
 
 function normalizeTone(val: unknown, fallback: ToneOption = "educational"): ToneOption {
@@ -161,73 +176,84 @@ function formatDurationFa(seconds: number): string {
   return `حدود ${seconds} ثانیه`;
 }
 
+function buildPageProfileAndMemoryContext(params: {
+  pageProfileId?: string | null;
+  projectId?: string | null;
+  agentRole: AgentSuperRole;
+}): { profile: PageProfile | null; promptBlock: string } {
+  const profile = getPageProfile(params.pageProfileId);
+  const memoryBlock = compileAgentMemoryPromptBlock({
+    memories: listAgentMemories(),
+    agentId: params.agentRole,
+    pageProfileId: params.pageProfileId,
+    projectId: params.projectId,
+    maxRules: 8,
+  });
+
+  if (!profile) {
+    return { profile: null, promptBlock: memoryBlock };
+  }
+
+  const profileLines = [
+    `\nپروفایل دائمی پیج فعال (رعایت ۱۰۰٪ الزامی بدون نیاز به تکرار توسط کاربر):`,
+    `- نام پیج: ${profile.name} (${profile.handle}) · پلتفرم: ${profile.platform}`,
+    `- حوزه تخصصی (Niche): ${profile.niche}`,
+    `- سبک محتوایی پیج: ${profile.contentStyle}`,
+    `- پرسونای دقیق مخاطب پیج: ${profile.targetAudiencePersona}`,
+    `- دغدغه‌ها و ترس‌های اصلی مخاطبان این پیج: ${profile.audiencePainPoints.join(" | ")}`,
+    `- لحن اختصاصی برند: ${profile.brandToneNoteFa}`,
+    `- هویت بصری و نورپردازی پیج: ${profile.visualAestheticFa}`,
+    `- خطوط قرمز ممنوعه این پیج: ${profile.tabooRedLines.join(" | ")}`,
+    `- گاردریل‌های الگوریتم این پیج: ${profile.algorithmGuardrails.join(" | ")}`,
+    profile.competitorHandles.length > 0
+      ? `- رقبای اصلی این پیج برای تمایزسازی: ${profile.competitorHandles.join(" ، ")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    profile,
+    promptBlock: `${profileLines}\n${memoryBlock}`,
+  };
+}
+
 /**
- * Unified Pro Scriptwriter Agent (Phase 1 — Strategist + Domain Researcher + Viral & Social Psychology):
- * Deeply analyzes the keyword's real industry/domain, defines the exact target buyer/audience persona
- * and core pain points, bans generic/textbook titles, and proposes 3 sharply differentiated viral topics
- * with concrete technical/factual data points, visual hooks, tones, and durations.
+ * Super-Agent 1 (ایجنت سناریونویس — Step 0):
+ * Proposes 3 sharply differentiated, deeply analyzed viral options tailored to the active Page Profile.
  */
 export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<TopicAnalysisResponse> {
-  const platformName = PLATFORM_LABELS[brief.platform] || PLATFORM_LABELS.instagram;
-  const formatName = brief.contentFormat
-    ? CONTENT_FORMAT_LABELS[brief.contentFormat]
-    : platformName;
+  const { profile, promptBlock } = buildPageProfileAndMemoryContext({
+    pageProfileId: brief.pageProfileId,
+    agentRole: "scriptwriter_agent",
+  });
+
+  const effectivePlatform = profile?.platform || brief.platform || "instagram";
+  const effectiveFormat = brief.contentFormat || profile?.defaultFormat || "reels";
   const pageMaturity: PageMaturityOption =
-    brief.pageMaturity === "growing_page" ? "growing_page" : "new_page";
+    brief.pageMaturity || profile?.pageMaturity || "new_page";
+
+  const platformName = PLATFORM_LABELS[effectivePlatform] || PLATFORM_LABELS.instagram;
+  const formatName = CONTENT_FORMAT_LABELS[effectiveFormat] || platformName;
   const pageMaturityLabel =
     pageMaturity === "new_page"
-      ? "شروع پیج (ویدیوهای اولیه: پست‌های ۱ تا ۵ — ساخت هویت پیج، اعتماد اولیه و جذب فالوور)"
-      : "پیج فعال و در حال رشد (۱۰ تا ۲۰+ پست — محتوای چالش‌برانگیز، افشاگری تخصصی و امتداد پست‌های قبلی)";
+      ? "شروع پیج (پست‌های ۱ تا ۵ — ساخت هویت پیج، اعتماد اولیه و جذب سریع فالوور)"
+      : "پیج فعال و در حال رشد (۱۰ تا ۲۰+ پست — محتوای چالشی، افشای اشتباهات پرهزینه و تثبیت مرجعیت)";
 
   let webResearch = "";
   const sources: GroundedSource[] = [];
-
-  // 1) Programmatic Hidden Agent Browser Web Mission
-  try {
-    const browserMission = await executeAgentWebResearchMission(
-      brief.idea,
-      "ایجنت استراتژیست و تحلیلگر موضوع"
-    );
-    if (browserMission.synthesizedContextFa) {
-      webResearch = browserMission.synthesizedContextFa;
-    }
-    for (const s of browserMission.sources) {
-      if (!sources.some((x) => x.uri === s.uri)) {
-        sources.push(s);
-      }
-    }
-  } catch {
-    // Non-fatal if offline
-  }
-
-  // 2) Augment with Gemini Google Search Grounding if available
   try {
     const ai = getClient();
     const searchRes = await generateWithModelFallback(ai, {
-      contents:
-        pageMaturity === "new_page"
-          ? `درباره عبارت یا ایده زیر یک تحقیق تخصصی، تاریخی و بازارمحور انجام بده (مناسب برای ویدیوهای اول یک پیج تازه تأسیس):
-«${brief.idea}»
-موارد زیر را دقیق و مستند استخراج کن:
-۱) حوزه واقعی و دقیق این موضوع در صنعت یا بازار (مثلاً صنعتی/مهندسی/B2B، پزشکی، مالی، عمومی و...) و کاربردهای اصلی و واقعی آن.
-۲) مخاطب هدف واقعی و خریداران/تصمیم‌گیرندگان اصلی این موضوع چه کسانی هستند؟
-۳) تاریخچه پیدایش و مخترعان یا نقطه عطف تحول این موضوع در طول دهه‌ها چیست، چه شگفتی علمی/عملی دارد، و اگر وجود نداشت دنیا یا این صنعت با چه بحرانی روبه‌رو می‌شد؟`
-          : `درباره عبارت یا ایده زیر یک تحقیق تخصصی و بازارمحور انجام بده (مناسب برای پیج فعال با ۱۰ تا ۲۰+ پست):
-«${brief.idea}»
-موارد زیر را دقیق و مستند استخراج کن:
-۱) حوزه واقعی و دقیق این موضوع در صنعت یا بازار (مثلاً صنعتی/مهندسی/B2B، پزشکی، مالی، عمومی و...) و کاربردهای اصلی و واقعی آن.
-۲) مخاطب هدف واقعی و خریداران/تصمیم‌گیرندگان اصلی این موضوع چه کسانی هستند؟
-۳) مهم‌ترین تقلب‌های پنهان بازار، اشتباهات پرهزینه و میلیاردی، مناظره‌های فنی و استانداردها و ترفندهای خرید/قرارداد مرتبط با آن چیست؟`,
+      contents: `درباره موضوع «${brief.idea}» ${profile ? `در حوزه تخصصی «${profile.niche}»` : ""} یک تحقیق بازارمحور، فنی و به‌روز انجام بده:
+۱) حوزه دقیق صنعتی/تخصصی، اعداد و استانداردهای واقعی و دغدغه‌های خریداران یا مخاطبان هدف.
+۲) الگوهای وایرال موفق و اشتباهات رایج یا باورهای غلط در این موضوع که بیشترین نرخ توقف اسکرول و اشتراک‌گذاری را در ${platformName} ایجاد می‌کنند.`,
       config: {
         tools: [{ googleSearch: {} }],
       },
     });
-    if (searchRes.text) {
-      webResearch = webResearch
-        ? `${webResearch}\n\n---\nتکمیل پژوهش از موتور جستجو:\n${searchRes.text}`
-        : searchRes.text;
-    }
-    const seen = new Set<string>(sources.map((s) => s.uri));
+    webResearch = searchRes.text ?? "";
+    const seen = new Set<string>();
     for (const chunk of searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
       if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
         seen.add(chunk.web.uri);
@@ -238,80 +264,41 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
       }
     }
   } catch {
-    // Keep browserMission findings
+    webResearch = "";
   }
 
   const maturityBlock =
     pageMaturity === "new_page"
       ? `استراتژی اجباری برای «شروع پیج (پست‌های ۱ تا ۵)»:
-   این پیج تازه راه‌اندازی شده است! مخاطب با دیدن این ویدیوهای اول باید دقیقاً بفهمد این پیج چه فعالیتی دارد، چه استاندارد حرفه‌ای پشت آن است و چرا ارزش فالو کردن دارد. **در ۵ پست اول از افشاگری‌های پرخاشگرانه یا جنجال‌های تند بازار پرهیز کن** و به جای آن ۳ آرک‌تایپ زیر را با دقت بساز:
-     * **پیشنهاد ۱ (آرک‌تایپ «مستند سینمایی پیدایش، تاریخچه یا اگر وجود نداشت»):** روایت جذاب و سینمایی درباره ریشه اختراع یا داستان واقعی ساخت/تحول این موضوع در طول تاریخ و اینکه اگر اختراع نمی‌شد چه اتفاقی می‌افتاد (مناسب برای وایرال گسترده و معرفی هویت تخصصی پیج).
-     * **پیشنهاد ۲ (آرک‌تایپ «ساختار هویت پیج و نقشه اعتمادسازی برای مخاطب هدف»):** ویدیویی که بدون شعارزدگی نشان دهد این صفحه دقیقاً چه مشکلی از این صنعت/حوزه حل می‌کند، چه خط قرمزی در کیفیت دارد و چرا متخصصان و خریداران باید این پیج را دنبال کنند.
-     * **پیشنهاد ۳ (آرک‌تایپ «شگفتی مهندسی، پشت‌صحنه یا راز تحول در چند دهه»):** نمایش یک شگفتی علمی/عملی، پشت‌صحنه فرآیند ساخت یا مقایسه تحول این محصول از گذشته تا امروز که نرخ اشتراک‌گذاری و جذب فالوور اولیه را منفجر کند.`
-      : `استراتژی اجباری برای «پیج فعال و در حال رشد (۱۰ تا ۲۰+ پست)»:
-   مخاطب این پیج الفبای حوزه را در پست‌های قبلی دیده و حالا دنبال محتوای عمیق‌تر، چالش‌برانگیزتر، افشاگرانه و سریالی است تا پیج را به مرجع بی‌رقیب صنعت تبدیل کند. ۳ آرک‌تایپ زیر را بساز:
-     * **پیشنهاد ۱ (آرک‌تایپ «افشای تقلب بازار، ریسک میلیاردی یا اشتباه مهلک»):** افشای دقیق تقلب رایج در بازار (چطور جنس تقلبی/کپی را جای اصل می‌فروشند یا یک اشتباه فنی منجر به خسارت سنگین می‌شود) + روش تست عملی در چند ثانیه.
-     * **پیشنهاد ۲ (آرک‌تایپ «چالش فنی، مناظره استانداردها و مقایسه آزمایشگاهی»):** به چالش کشیدن یک باور رایج بین همکاران یا مقایسه عددی/عملی دو استاندارد و ضخامت با نتیجه غافلگیرکننده برای گرفتن بیشترین کامنت و بحث تخصصی.
-     * **پیشنهاد ۳ (آرک‌تایپ «راز صنفی خرید، ترفند فاکتور و امتداد سری محتوایی»):** افشای نکته‌ای که خریداران عمده و کارفرماها باید هنگام عقد قرارداد/تحویل بار بدانند و اتصال طبیعی آن به محتوای تخصصی قبلی پیج (برای حداکثر ذخیره و فوروارد).`;
+   - پیشنهاد ۱ (آرک‌تایپ «داستان واقعی/تست عینی در ثانیه اول»): نمایش یک حقیقت شگفت‌انگیز یا تست عملی فوری برای جذب گسترده مخاطب سرد.
+   - پیشنهاد ۲ (آرک‌تایپ «نقشه اعتماد و تمایز تخصصی پیج»): حل یک مشکل پرهزینه مخاطب هدف که باعث شود فوراً دکمه فالو را بزند.
+   - پیشنهاد ۳ (آرک‌تایپ «پشت‌صحنه، شگفتی فنی یا مقایسه قبل و بعد»): ویدیویی با ارزش ذخیره (Save) و فوروارد بالا.`
+      : `استراتژی اجباری برای «پیج در حال رشد (۱۰ تا ۲۰+ پست)»:
+   - پیشنهاد ۱ (آرک‌تایپ «افشای خطای پرهزینه یا تقلب بازار + راه تشخیص سریع»): بالاترین نرخ فوروارد و ذخیره.
+   - پیشنهاد ۲ (آرک‌تایپ «مقایسه چالشی دو روش/محصول با نتیجه غافلگیرکننده»): بالاترین نرخ کامنت و بحث تخصصی.
+   - پیشنهاد ۳ (آرک‌تایپ «چک‌لیست طلایی خرید/اجرا برای حرفه‌ای‌ها»): تثبیت اعتبار و تبدیل بازدیدکننده به مشتری.`;
 
-  const prompt = `شما «ایجنت واحد سناریونویس حرفه‌ای و نخبه» هستید که ۴ تخصص عمیق را هم‌زمان در سطح ارشد اجرا می‌کنید:
-۱) استراتژیست ارشد محتوای شبکه‌های اجتماعی و بازاریابی B2B/B2C،
-۲) پژوهشگر و تحلیلگر دقیق صنعت/بازار و اعتبارسنج فنی (Domain Researcher)،
-۳) متخصص روانشناسی مخاطب و الگوریتم سوشال مدیا،
-۴) سناریونویس خلاق وایرال‌ساز برای ${platformName} (${formatName}).
+  const prompt = `شما «ایجنت ۱: سناریونویس جامع استودیو» (ترکیب پژوهشگر بازار، تحلیلگر رقبا و الگوهای وایرال، استراتژیست سوشال مدیا، روانشناس مخاطب و سناریونویس ارشد) هستید.
 
 ورودی کاربر:
-- کلمه کلیدی یا ایده کاربر: «${brief.idea}»
-- پلتفرم انتخاب‌شده: ${platformName}
-- فرمت محتوا: ${formatName}
-- وضعیت و سن پیج: ${pageMaturityLabel}
-${webResearch ? `- یافته‌های پژوهش وب:\n${webResearch}` : ""}
+- موضوع خام واردشده: «${brief.idea}»
+- پلتفرم و فرمت: ${platformName} — ${formatName}
+- وضعیت پیج: ${pageMaturityLabel}
+${promptBlock}
+${webResearch ? `\nیافته‌های پژوهش وب زنده:\n${webResearch}` : ""}
 
-قوانین طلایی و غیرقابل‌تخطی برای تحلیل و تولید موضوع:
-۱. **تحلیل دقیق حوزه واقعی کلمه کلیدی (بسیار مهم):**
-   ابتدا ماهیت واقعی موضوع را بشناس! اگر کلمه کلیدی تخصصی یا صنعتی است (مثلاً «لوله مانیسمان» که یک لوله فولادی بدون درز برای صنایع نفت، گاز، پتروشیمی، بخار پرفشار، بویلرهای صنعتی و خطوط حساس است)، اکیداً ممنوع است آن را به موضوعات اشتباه یا عامیانه (مثل گرمایش خانه و شوفاژ!) تقلیل بدهی. باید دقیقاً وارد زیست‌بوم واقعی، استانداردها، دغدغه‌های خرید عمده و مهندسی همان صنعت شوی.
-۲. **ممنوعیت مطلق مخاطب مبهم یا عمومی:**
-   هرگز مخاطب را کلی (مثل «علاقه‌مندان»، «همه مردم»، «کسانی که دنبال خرید هستند») ننویس! برای کل پروژه و برای تک‌تک موضوع‌ها باید **پرسونای دقیق و واقعی مخاطب** را مشخص کنی (شغل/نقش دقیق، سطح دانش فنی، تصمیم‌گیرنده خرید کیست، و چرا وسط اسکرول روی این ویدیو مکث می‌کند).
-۳. **ممنوعیت کامل تیترهای کتابی، تکراری و غیرویرال:**
-   - استفاده از تیترهای دایره‌المعارفی مثل «... چیست؟»، «معرفی کامل ...»، «چرا ... مهم است؟»، «کاربردهای ...» **اکیداً ممنوع** است!
-   - ۳ پیشنهاد نباید شبیه هم باشند یا صرفاً یک مفهوم را با ۳ جمله متفاوت تکرار کنند.
-   ${maturityBlock}
-۴. **ارائه داده‌ها و نقاط فنی عمیق در هر پیشنهاد (نه حرف‌های کلی):**
-   هر پیشنهاد باید ۳ تا ۴ نکته واقعی، عدد، تاریخ، معیار فنی یا فکت معتبر مرتبط با کلمه کلیدی (keyFactsAndDataPoints) داشته باشد که نشان دهد سناریو روی دانش عمیق سوار است.
-۵. **انتخاب خودکار لحن و مدت‌زمان متمایز برای ۳ موضوع:**
-   برای ۳ موضوع، ۳ لحن متفاوت از بین ["educational", "cinematic_story", "news_analysis", "fast_motivational"] انتخاب کن و مدت‌زمان واقعی متناسب با فرمت «${formatName}» و ریتم همان سناریو را تعیین کن.
-
-فیلدهای خروجی که باید تولید کنی:
-- hasDetailedScriptInstructions: آیا کاربر در متن خودش جزئیات و ساختار سناریو داده (true) یا فقط کلمه کلیدی/ایده کلی نوشته (false)؟
-- keywordDomainAnalysis: ۲ تا ۳ جمله دقیق درباره ماهیت واقعی، حوزه تخصصی و جایگاه کلمه کلیدی در بازار/صنعت واقعی.
-- exactTargetAudience: تعریف دقیق و مشخص مخاطب هدف اصلی (نقش شغلی، سطح دانش، انگیزه مالی/فنی و رفتار در سوشال مدیا).
-- corePainPoints: آرایه ۳ تا ۴ موردی از واقعی‌ترین ترس‌ها، اشتباهات پرهزینه یا کنجکاوی‌های پنهان این مخاطب هدف.
-- pageStrategyRecommendation: ۱ تا ۲ جمله دقیق درباره اینکه با توجه به «${pageMaturity === "new_page" ? "شروع پیج (پست‌های ۱ تا ۵)" : "پیج فعال (۱۰ تا ۲۰+ پست)"}» چرا این نوع چیدمان ویدیوها به رشد، وایرال شدن و جایگاه پیج کمک می‌کند.
-- strategistSummary: جمع‌بندی صمیمی، حرفه‌ای و دقیق فارسی خطاب به کاربر درباره تحلیل مخاطب و زاویه‌های کشف‌شده.
-- defaultRecommendedTone, defaultRecommendedToneLabelFa, defaultRecommendedDurationSeconds, defaultRecommendedDurationLabelFa: بهترین لحن و زمان در صورت نگارش مستقیم روی متن کاربر.
-- proposals: دقیقاً ۳ موضوع کاملاً متمایز، هرکدام شامل:
-  * id
-  * title (تیتر واقعی، کنجکاوی‌برانگیز و وایرال — بدون «چیست؟»)
-  * angleArchetype (نام دقیق آرک‌تایپ متناسب با مرحله پیج)
-  * targetAudienceSegment (مخاطب دقیق و خاص همین ویدیو)
-  * recommendedTone, recommendedToneLabelFa, recommendedDurationSeconds, recommendedDurationLabelFa
-  * sampleHook (متن قلاب گفتاری ۳ ثانیه اول به فارسی طبیعی و کوبنده)
-  * openingVisualHook (دقیقاً در ۳ ثانیه اول چه تصویری جلوی دوربین باشد تا اسکرول متوقف شود)
-  * keyFactsAndDataPoints (آرایه ۳ تا ۴ نکته/عدد/استاندارد فنی واقعی که در بدنه این سناریو استفاده می‌شود)
-  * strategistAngle (چرا این زاویه برای جذب مخاطب هدف و جایگاه برند در این مرحله از پیج عالی است)
-  * psychologyTrigger (چه محرک روانی باعث توقف مخاطب، فالو کردن/ذخیره و فوروارد می‌شود)
-  * creatorExecutionTip (نکته حرفه‌ای اجرا، تدوین یا فیلم‌برداری متناسب با فرمت «${formatName}»)
-  * ctaStrategy (بهترین کال‌تو‌اکشن پایانی متناسب با مرحله پیج)
-  * viralPotentialNote (یک جمله دقیق درباره دلیل اشتراک‌گذاری و وایرال شدن این ویدیو)`;
+قوانین طلایی:
+۱. تیترهای کتابی مثل «... چیست؟» یا «معرفی کامل ...» اکیداً ممنوع است.
+۲. دقیقاً ۳ گزینه بی‌نظیر و کاملاً متمایز بساز که از نظر ارزش محتوا، قلاب ۳ ثانیه اول، استراتژی الگوریتم، پرسونای مخاطب و محرک روانشناختی تکمیل و بررسی شده باشند.
+۳. ${maturityBlock}
+۴. هر پیشنهاد باید شامل ۳ تا ۴ داده/فکت واقعی (keyFactsAndDataPoints)، قلاب کلامی، قلاب تصویری ثانیه اول و امتیاز ارزش محتوا (contentValueScoreNote) باشد.`;
 
   const routed = await executeAgentJsonWithRouter<Partial<TopicAnalysisResponse>>({
     agentId: "research_script",
-    prompt: `${prompt}\n\nپاسخ باید یک JSON Object دقیق شامل کلیدهای زیر باشد:
-"hasDetailedScriptInstructions", "keywordDomainAnalysis", "exactTargetAudience", "corePainPoints" (آرایه ۳ تا ۴ رشته), "pageStrategyRecommendation", "strategistSummary", "defaultRecommendedTone", "defaultRecommendedToneLabelFa", "defaultRecommendedDurationSeconds", "defaultRecommendedDurationLabelFa", "proposals" (آرایه‌ای با دقیقاً ۳ آبجکت دارای: id, title, angleArchetype, targetAudienceSegment, recommendedTone, recommendedToneLabelFa, recommendedDurationSeconds, recommendedDurationLabelFa, sampleHook, openingVisualHook, keyFactsAndDataPoints, strategistAngle, psychologyTrigger, creatorExecutionTip, ctaStrategy, viralPotentialNote).`,
+    prompt: `${prompt}\n\nخروجی باید یک JSON Object دقیق شامل کلیدهای زیر باشد:
+"hasDetailedScriptInstructions", "keywordDomainAnalysis", "exactTargetAudience", "corePainPoints", "pageStrategyRecommendation", "strategistSummary", "defaultRecommendedTone", "defaultRecommendedToneLabelFa", "defaultRecommendedDurationSeconds", "defaultRecommendedDurationLabelFa", "proposals" (آرایه ۳ آبجکت شامل id, title, angleArchetype, targetAudienceSegment, recommendedTone, recommendedToneLabelFa, recommendedDurationSeconds, recommendedDurationLabelFa, contentValueScoreNote, sampleHook, openingVisualHook, keyFactsAndDataPoints, strategistAngle, psychologyTrigger, creatorExecutionTip, ctaStrategy, viralPotentialNote).`,
     systemInstruction:
-      pageMaturity === "new_page"
-        ? "شما یک سناریونویس و استراتژیست ارشد برای راه‌اندازی پیج‌های جدید (پست‌های ۱ تا ۵) هستید. هرگز تیتر کلیشه‌ای «... چیست؟» ننویسید، از افشاگری‌های پرخاشگرانه در پست‌های اول پرهیز کنید، و ۳ زاویه مستند/تاریخچه، هویت‌ساز پیج و شگفتی علمی-مهندسی بسازید که مخاطب دقیق فوراً پیج را فالو کند."
-        : "شما یک سناریونویس و استراتژیست ارشد برای پیج‌های فعال و در حال رشد (۱۰ تا ۲۰+ پست) هستید. هرگز تیتر کلیشه‌ای «... چیست؟» ننویسید و ۳ زاویه چالش‌برانگیز، افشای تقلب، مناظره فنی و راز صنفی بسازید که بیشترین کامنت، ذخیره و فوروارد تخصصی را بگیرد.",
+      "شما ایجنت ۱ (سناریونویس، استراتژیست و روانشناس سوشال مدیا) هستید. خروجی را ۱۰۰٪ به فارسی تخصصی، عملی و وایرال برگردانید.",
     expectedKeys: [
       "hasDetailedScriptInstructions",
       "keywordDomainAnalysis",
@@ -357,6 +344,7 @@ ${webResearch ? `- یافته‌های پژوهش وب:\n${webResearch}` : ""}
               recommendedToneLabelFa: { type: Type.STRING },
               recommendedDurationSeconds: { type: Type.INTEGER },
               recommendedDurationLabelFa: { type: Type.STRING },
+              contentValueScoreNote: { type: Type.STRING },
               sampleHook: { type: Type.STRING },
               openingVisualHook: { type: Type.STRING },
               keyFactsAndDataPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
@@ -404,29 +392,24 @@ ${webResearch ? `- یافته‌های پژوهش وب:\n${webResearch}` : ""}
   });
 
   const parsed = routed.data;
-  const fallbackTones: ToneOption[] =
-    pageMaturity === "new_page"
-      ? ["cinematic_story", "educational", "fast_motivational"]
-      : ["news_analysis", "educational", "fast_motivational"];
+  const fallbackTones: ToneOption[] = ["news_analysis", "educational", "fast_motivational"];
   const defaultTone = normalizeTone(
     parsed.defaultRecommendedTone,
-    pageMaturity === "new_page" ? "cinematic_story" : "educational"
+    profile?.brandTone || "educational"
   );
-  const defaultSecs = clampDuration(parsed.defaultRecommendedDurationSeconds, brief.contentFormat);
+  const defaultSecs = clampDuration(parsed.defaultRecommendedDurationSeconds, effectiveFormat);
 
   return {
     hasDetailedScriptInstructions: Boolean(parsed.hasDetailedScriptInstructions),
     keywordDomainAnalysis: parsed.keywordDomainAnalysis || "",
-    exactTargetAudience: parsed.exactTargetAudience || "",
-    corePainPoints: Array.isArray(parsed.corePainPoints) ? parsed.corePainPoints : [],
-    pageStrategyRecommendation:
-      parsed.pageStrategyRecommendation ||
-      (pageMaturity === "new_page"
-        ? "این چیدمان برای ۵ پست اول طراحی شده تا هویت تخصصی پیج، اعتماد اولیه و انگیزه فالو کردن را در مخاطب هدف ایجاد کند."
-        : "این چیدمان برای پیج فعال (۱۰ تا ۲۰+ پست) طراحی شده تا با موضوعات چالشی و فنی، نرخ ذخیره، کامنت و فوروارد تخصصی را بالا ببرد."),
+    exactTargetAudience: parsed.exactTargetAudience || profile?.targetAudiencePersona || "",
+    corePainPoints: Array.isArray(parsed.corePainPoints)
+      ? parsed.corePainPoints
+      : profile?.audiencePainPoints || [],
+    pageStrategyRecommendation: parsed.pageStrategyRecommendation || "",
     strategistSummary:
       parsed.strategistSummary ||
-      "کلمه کلیدی شما از نظر ماهیت بازار، وضعیت پیج و مخاطب هدف دقیق بررسی شد و ۳ زاویه متمایز آماده است:",
+      "موضوع شما بر اساس پروفایل پیج، روانشناسی مخاطب و الگوریتم بررسی شد و ۳ زاویه منتخب آماده است:",
     defaultRecommendedTone: defaultTone,
     defaultRecommendedToneLabelFa: parsed.defaultRecommendedToneLabelFa || TONE_LABELS[defaultTone],
     defaultRecommendedDurationSeconds: defaultSecs,
@@ -434,12 +417,13 @@ ${webResearch ? `- یافته‌های پژوهش وب:\n${webResearch}` : ""}
       parsed.defaultRecommendedDurationLabelFa || formatDurationFa(defaultSecs),
     proposals: (parsed.proposals ?? []).slice(0, 3).map((p, i) => {
       const pTone = normalizeTone(p.recommendedTone, fallbackTones[i % fallbackTones.length]);
-      const pSecs = clampDuration(p.recommendedDurationSeconds, brief.contentFormat);
+      const pSecs = clampDuration(p.recommendedDurationSeconds, effectiveFormat);
       return {
         ...p,
         id: p.id || `topic_${i + 1}`,
         angleArchetype: p.angleArchetype || `زاویه تخصصی ${i + 1}`,
-        targetAudienceSegment: p.targetAudienceSegment || parsed.exactTargetAudience || "",
+        targetAudienceSegment: p.targetAudienceSegment || profile?.targetAudiencePersona || "",
+        contentValueScoreNote: p.contentValueScoreNote || "ارزش ذخیره و اشتراک‌گذاری بالا",
         openingVisualHook: p.openingVisualHook || "",
         keyFactsAndDataPoints: Array.isArray(p.keyFactsAndDataPoints) ? p.keyFactsAndDataPoints : [],
         ctaStrategy: p.ctaStrategy || "",
@@ -454,86 +438,59 @@ ${webResearch ? `- یافته‌های پژوهش وب:\n${webResearch}` : ""}
 }
 
 /**
- * Unified Pro Scriptwriter Agent (Phase 2 — Deep Fact Validation & Full Script Generation)
+ * Super-Agent 1 (ایجنت سناریونویس — Stage 1):
+ * Builds a mature, psychology-driven, algorithm-safe full scenario from the selected angle.
  */
 export async function runMergedResearchAndScript(
   brief: ProjectBrief,
-  feedback?: string
+  feedback?: string,
+  projectId?: string
 ): Promise<ResearchAndScriptOutput> {
+  const { profile, promptBlock } = buildPageProfileAndMemoryContext({
+    pageProfileId: brief.pageProfileId,
+    projectId,
+    agentRole: "scriptwriter_agent",
+  });
+
   const platformName = PLATFORM_LABELS[brief.platform] || PLATFORM_LABELS.instagram;
   const formatName = brief.contentFormat
     ? CONTENT_FORMAT_LABELS[brief.contentFormat]
     : platformName;
-  const pageMaturity: PageMaturityOption =
-    brief.pageMaturity === "growing_page" ? "growing_page" : "new_page";
-  const pageMaturityLabel =
-    pageMaturity === "new_page"
-      ? "شروع پیج (پست‌های ۱ تا ۵ — تمرکز بر هویت‌سازی، اعتبار اولیه و جذب فالوور)"
-      : "پیج فعال (۱۰ تا ۲۰+ پست — تمرکز بر محتوای چالشی، تخصصی عمیق و پیوستگی با پست‌های قبلی)";
   const toneName = brief.toneLabelFa?.trim() || TONE_LABELS[brief.tone] || TONE_LABELS.educational;
   const targetSecs = clampDuration(brief.targetDurationSeconds, brief.contentFormat);
   const sel = brief.selectedTopicAngle;
-  const selectedAngleBlock = sel
-    ? `\nموضوع و زاویه انتخاب‌شده توسط کاربر:
-- عنوان منتخب: ${sel.title}
-- ساختار و آرک‌تایپ موضوع: ${sel.angleArchetype || "تخصصی"}
-- مخاطب هدف دقیق این موضوع: ${sel.targetAudienceSegment || "تخصصی و دقیق"}
-- لحن پیشنهادی دقیق: ${sel.recommendedToneLabelFa}
-- مدت‌زمان پیشنهادی: ${sel.recommendedDurationLabelFa} (${targetSecs} ثانیه)
-- قلاب کلامی پیشنهادی: ${sel.sampleHook}
-- قلاب بصری ۳ ثانیه اول: ${sel.openingVisualHook || ""}
-- نکات فنی و داده‌های کلیدی منتخب: ${(sel.keyFactsAndDataPoints ?? []).join(" | ")}
-- استراتژی محتوا: ${sel.strategistAngle}
-- محرک روانشناختی: ${sel.psychologyTrigger}
-- استراتژی CTA: ${sel.ctaStrategy || ""}
-- نکته اجرا: ${sel.creatorExecutionTip}`
-    : "";
 
-  // Step A: Grounded Web Search Research (gracefully skipped if quota limited)
-  const searchPrompt = `شما پژوهشگر و اعتبارسنج تخصصی این صنعت/حوزه هستید. درباره موضوع زیر تحقیق عمیق، فنی و بازارمحور انجام دهید و داده‌ها، تاریخچه/استانداردها و حقایق کلیدی متناسب با وضعیت پیج را به فارسی استخراج و اعتبارسنجی کنید:
-عنوان پروژه: ${brief.title}
-ایده/کلمه کلیدی کاربر: ${brief.idea}
-وضعیت پیج: ${pageMaturityLabel}
-پلتفرم و فرمت هدف: ${platformName} — ${formatName}${selectedAngleBlock}
-${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback}` : ""}`;
+  const selectedAngleBlock = sel
+    ? `\nگزینه منتخب کاربر از بین ۳ پیشنهاد استراتژیست:
+- عنوان منتخب: ${sel.title}
+- آرک‌تایپ: ${sel.angleArchetype || "تخصصی"}
+- پرسونای دقیق: ${sel.targetAudienceSegment || ""}
+- قلاب پیشنهادی: ${sel.sampleHook}
+- قلاب بصری ثانیه اول: ${sel.openingVisualHook || ""}
+- فکت‌ها و داده‌های کلیدی: ${(sel.keyFactsAndDataPoints ?? []).join(" | ")}
+- محرک روانشناختی: ${sel.psychologyTrigger}
+- استراتژی CTA: ${sel.ctaStrategy || ""}`
+    : "";
 
   let groundedSummaryText = "";
   const sources: GroundedSource[] = [];
-
-  // Step A.1: Autonomous Hidden Agent Browser Web Mission
-  try {
-    const queryForBrowser = sel?.title ? `${brief.idea} ${sel.title}` : brief.idea;
-    const browserMission = await executeAgentWebResearchMission(
-      queryForBrowser,
-      "ایجنت پژوهشگر و سناریونویس"
-    );
-    if (browserMission.synthesizedContextFa) {
-      groundedSummaryText = browserMission.synthesizedContextFa;
-    }
-    for (const s of browserMission.sources) {
-      sources.push(s);
-    }
-  } catch {
-    // Non-fatal
-  }
-
-  // Step A.2: Grounded Web Search Research (gracefully skipped if quota limited)
   try {
     const ai = getClient();
     const searchRes = await generateWithModelFallback(ai, {
-      contents: searchPrompt,
+      contents: `تحقیق مستند و اعتبارسنجی فنی برای نگارش سناریوی ویدیویی:
+عنوان: ${brief.title}
+ایده: ${brief.idea}
+${profile ? `حوزه پیج: ${profile.niche}` : ""}${selectedAngleBlock}
+${feedback ? `اصلاحیه درخواستی کاربر: ${feedback}` : ""}`,
       config: {
         tools: [{ googleSearch: {} }],
       },
     });
-    if (searchRes.text) {
-      groundedSummaryText = groundedSummaryText
-        ? `${groundedSummaryText}\n\n---\nیافته‌های تکمیلی موتور جستجو:\n${searchRes.text}`
-        : searchRes.text;
-    }
-    const chunks = searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-    for (const chunk of chunks) {
-      if (chunk.web?.uri) {
+    groundedSummaryText = searchRes.text ?? "";
+    const seen = new Set<string>();
+    for (const chunk of searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
+      if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
+        seen.add(chunk.web.uri);
         sources.push({
           title: chunk.web.title || chunk.web.uri,
           uri: chunk.web.uri,
@@ -541,51 +498,34 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
       }
     }
   } catch {
-    if (!groundedSummaryText) {
-      groundedSummaryText = `تحلیل و پژوهش تخصصی موضوع "${brief.title}" با تمرکز بر: ${brief.idea}`;
-    }
+    groundedSummaryText = `پژوهش تخصصی موضوع «${brief.title}»`;
   }
 
-  const uniqueSources: GroundedSource[] = [];
-  const seenUris = new Set<string>();
-  for (const s of sources) {
-    if (!seenUris.has(s.uri)) {
-      seenUris.add(s.uri);
-      uniqueSources.push(s);
-    }
-  }
+  const approxWords = Math.max(45, Math.round((targetSecs / 60) * 135));
+  const synthesisPrompt = `شما «ایجنت ۱: سناریونویس ارشد استودیو» هستید. از ایده خام و زاویه منتخب کاربر، یک سناریوی فوق‌العاده پخته، جذاب، منطبق با قوانین روانشناسی مخاطب و ایمن برای الگوریتم ${platformName} بسازید.
 
-  // Step B: Unified Pro Scriptwriter synthesis into strict structured JSON
-  const approxWordCount = Math.round((targetSecs / 60) * 145);
-  const synthesisPrompt = `شما ایجنت تخصصی واحد «سناریونویس حرفه‌ای (استراتژیست، پژوهشگر و اعتبارسنج، تحلیلگر ویرال و متخصص روانشناسی سوشال مدیا)» هستید.
-تمام خروجی‌ها باید ۱۰۰٪ به زبان فارسی روان، طبیعی، تخصصی-کاربردی، جذاب و کاملاً منطبق با فرمت انتخابی کاربر و اصول روانشناسی مخاطب باشد. از کلی‌گویی، جملات کتابی و تکرار مطالب عمومی اکیداً پرهیز کنید.
+مشخصات پروژه:
+- عنوان: ${brief.title}
+- ایده خام: ${brief.idea}
+- پلتفرم و فرمت: ${platformName} — ${formatName}
+- لحن: ${toneName}
+- مدت‌زمان هدف: ${targetSecs} ثانیه (حدود ${approxWords} کلمه گفتار)${selectedAngleBlock}
+${promptBlock}
+${feedback ? `\nبازخورد مستقیم کاربر برای اصلاح سناریو (رعایت ۱۰۰٪ الزامی): ${feedback}` : ""}
 
-مشخصات ورودی:
-- عنوان ایده: ${brief.title}
-- متن ایده و توضیحات کامل کاربر: ${brief.idea}
-- پلتفرم: ${platformName}
-- فرمت محتوا: ${formatName}
-- وضعیت پیج: ${pageMaturityLabel}
-- لحن انتخاب‌شده: ${toneName}
-- مدت‌زمان پیشنهادی: ${targetSecs} ثانیه (حدود ${approxWordCount} کلمه گفتار)${selectedAngleBlock}
-${feedback ? `- بازخورد اصلاحی کاربر (بسیار مهم): ${feedback}` : ""}
-
-یافته‌های پژوهش و اعتبارسنجی وب:
+یافته‌های پژوهش وب:
 ${groundedSummaryText}
 
-وظیفه شما:
-1. مخاطب هدف دقیق (targetAudienceNote) را با ذکر نقش شغلی/تصمیم‌گیری، دغدغه واقعی و سطح دانش فنی بنویسید (هرگز کلی ننویسید).
-2. یافته‌های پژوهش را اعتبارسنجی کنید و ۴ تا ۵ داده، استاندارد، آمار یا نکته واقعی و ملموس (keyInsights) و ۳ زاویه جذاب محتوایی (trendingAngles) تنظیم کنید.
-3. بر اساس وضعیت پیج («${pageMaturity === "new_page" ? "شروع پیج / پست‌های ۱ تا ۵: ساخت هویت و اعتماد برای گرفتن فالوور اولیه" : "پیج فعال ۱۰ تا ۲۰+ پست: چالش عمیق، افشاگری تخصصی و امتداد سری قبلی"}»)، استراتژی و فرمت «${formatName}»، یک سناریوی دقیق، معتبر و پرکشش بنویسید:
-   - قلاب (hook): ۳ ثانیه طلایی اول با ضربه روانی/فنی فوری برای متوقف کردن مخاطب هدف.
-   - بدنه (body): روایت منسجم، مبتنی بر واقعیت‌های بازار/فنی، پر از جزئیات ملموس و منطبق با ریتم ${targetSecs} ثانیه.
-   - دعوت به اقدام (cta): پایان هوشمندانه متناسب با هدف پیج (${pageMaturity === "new_page" ? "دعوت طبیعی به فالو کردن برای دنبال کردن مسیر تخصصی این پیج" : "دعوت به ذخیره، بحث در کامنت یا ارسال برای همکاران"}).`;
+علاوه بر قلاب (hook)، بدنه (body) و دعوت به اقدام (cta)، حتماً دو چک‌لیست زیر را هم دقیق پر کنید:
+- psychologicalTriggersUsed: آرایه ۳ موردی از تکنیک‌های روانشناسی به‌کاررفته در این سناریو (مثل گپ کنجکاوی، زیان‌گریزی، اثبات عینی و...).
+- algorithmComplianceChecklist: آرایه ۳ تا ۴ موردی که تضمین می‌کند این پست از الگوریتم خارج نمی‌شود و شادوبن نمی‌خورد (رعایت ریتم، نبود کلمات اسپم، سیگنال Save/Share طبیعی).`;
 
   const routed = await executeAgentJsonWithRouter<Omit<ResearchAndScriptOutput, "sources">>({
     agentId: "research_script",
-    prompt: `${synthesisPrompt}\n\nخروجی باید یک JSON Object با کلیدهای دقیق زیر باشد:\n"videoTitle", "targetAudienceNote", "researchSummary", "keyInsights" (آرایه ۴ تا ۵ رشته), "trendingAngles" (آرایه ۳ رشته), "hook", "body", "cta", "keywords" (آرایه ۵ رشته).`,
+    prompt: `${synthesisPrompt}\n\nخروجی باید یک JSON Object دقیق شامل کلیدهای زیر باشد:
+"videoTitle", "targetAudienceNote", "researchSummary", "keyInsights", "trendingAngles", "hook", "body", "cta", "psychologicalTriggersUsed", "algorithmComplianceChecklist", "keywords".`,
     systemInstruction:
-      "شما ایجنت واحد سناریونویس حرفه‌ای (دارای تخصص استراتژیست، پژوهشگر و اعتبارسنجی، تحلیل ویرال و روانشناسی سوشال مدیا) هستید. تمام فیلدهای خروجی را با بالاترین کیفیت ادبی، دقت علمی و ریتم ویرال به فارسی بنویسید.",
+      "شما ایجنت ۱ (سناریونویس و استراتژیست ارشد) هستید. سناریویی بنویسید که از ثانیه اول مخاطب را میخکوب کند و هیچ خطای الگوریتمی نداشته باشد.",
     expectedKeys: [
       "videoTitle",
       "targetAudienceNote",
@@ -595,32 +535,24 @@ ${groundedSummaryText}
       "hook",
       "body",
       "cta",
+      "psychologicalTriggersUsed",
+      "algorithmComplianceChecklist",
       "keywords",
     ],
     googleResponseSchema: {
       type: Type.OBJECT,
       properties: {
-        videoTitle: { type: Type.STRING, description: "عنوان جذاب و نهایی ویدیو به فارسی" },
-        targetAudienceNote: { type: Type.STRING, description: "توضیح کوتاه درباره مخاطب هدف و نیاز او" },
-        researchSummary: { type: Type.STRING, description: "خلاصه جامع یافته‌های پژوهش به فارسی" },
-        keyInsights: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
-          description: "۴ تا ۵ آمار، فکت یا بینش کلیدی استخراج‌شده",
-        },
-        trendingAngles: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
-          description: "۳ زاویه خلاقانه و وایرال برای روایت موضوع",
-        },
-        hook: { type: Type.STRING, description: "متن قلاب ۳ ثانیه اول سناریو به فارسی" },
-        body: { type: Type.STRING, description: "متن کامل بدنه سناریو به فارسی" },
-        cta: { type: Type.STRING, description: "متن کال‌تو‌اکشن پایانی سناریو به فارسی" },
-        keywords: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
-          description: "۵ کلمه کلیدی اصلی محتوا به فارسی",
-        },
+        videoTitle: { type: Type.STRING },
+        targetAudienceNote: { type: Type.STRING },
+        researchSummary: { type: Type.STRING },
+        keyInsights: { type: Type.ARRAY, items: { type: Type.STRING } },
+        trendingAngles: { type: Type.ARRAY, items: { type: Type.STRING } },
+        hook: { type: Type.STRING },
+        body: { type: Type.STRING },
+        cta: { type: Type.STRING },
+        psychologicalTriggersUsed: { type: Type.ARRAY, items: { type: Type.STRING } },
+        algorithmComplianceChecklist: { type: Type.ARRAY, items: { type: Type.STRING } },
+        keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
       },
       required: [
         "videoTitle",
@@ -631,96 +563,593 @@ ${groundedSummaryText}
         "hook",
         "body",
         "cta",
+        "psychologicalTriggersUsed",
+        "algorithmComplianceChecklist",
         "keywords",
       ],
     },
   });
 
   const parsed = routed.data;
-  return {
+  let candidate: ResearchAndScriptOutput = {
     ...parsed,
     keyInsights: Array.isArray(parsed.keyInsights) ? parsed.keyInsights : [],
     trendingAngles: Array.isArray(parsed.trendingAngles) ? parsed.trendingAngles : [],
+    psychologicalTriggersUsed: Array.isArray(parsed.psychologicalTriggersUsed)
+      ? parsed.psychologicalTriggersUsed
+      : [],
+    algorithmComplianceChecklist: Array.isArray(parsed.algorithmComplianceChecklist)
+      ? parsed.algorithmComplianceChecklist
+      : [],
     keywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
-    sources: uniqueSources.slice(0, 6),
+    sources: sources.slice(0, 6),
+  };
+
+  let audit = auditScenarioOutput(candidate, brief, profile, 1);
+  if (!audit.passed) {
+    const failedItems = audit.checks.filter((c) => !c.passed).map((c) => `${c.nameFa}: ${c.detailFa}`);
+    const fixes: string[] = [];
+    try {
+      const repairRes = await executeAgentJsonWithRouter<Omit<ResearchAndScriptOutput, "sources">>({
+        agentId: "research_script",
+        prompt: `سناریوی زیر در بازبینی فنی مردود شده است. لطفاً دقیقاً این ایرادها را برطرف کن و JSON کامل سناریو را برگردان:
+ایرادهای بازبینی:
+${failedItems.join("\n")}
+
+سناریوی فعلی:
+${JSON.stringify(candidate)}`,
+        systemInstruction:
+          "شما ناظر و اصلاح‌گر ارشد سناریو هستید. بدون تغییر موضوع اصلی، تمام ایرادهای بازبینی فنی (قلاب زیر ۳۰ کلمه، تیتر غیرکتابی، تطابق حجم کلمات با زمان هدف و چک‌لیست الگوریتم) را اصلاح کنید.",
+        expectedKeys: [
+          "videoTitle",
+          "targetAudienceNote",
+          "researchSummary",
+          "keyInsights",
+          "trendingAngles",
+          "hook",
+          "body",
+          "cta",
+          "psychologicalTriggersUsed",
+          "algorithmComplianceChecklist",
+          "keywords",
+        ],
+      });
+      fixes.push(`بازنویسی خودکار پس از ایراد در: ${audit.checks.filter((c) => !c.passed).map((c) => c.nameFa).join("، ")}`);
+      candidate = {
+        ...candidate,
+        ...repairRes.data,
+        sources: candidate.sources,
+      };
+      audit = auditScenarioOutput(candidate, brief, profile, 2, fixes);
+    } catch {
+      // Keep original candidate with audit attached
+    }
+  }
+
+  return {
+    ...candidate,
+    qaAudit: audit,
   };
 }
 
 /**
- * Agent 2: Voiceover Script Adaptation + Real Gemini TTS WAV Generation
+ * Super-Agent 1 (ایجنت سناریونویس — Stage 2):
+ * Converts approved scenario into a visual-synced Persian Narration Script with
+ * COMPLETE Persian diacritics (اعراب‌گذاری کامل کلمات حساس، کسره اضافه، تشدید) + pronunciation guide.
+ */
+export async function runNarrationScriptAgent(
+  script: ResearchAndScriptOutput,
+  brief: ProjectBrief,
+  feedback?: string,
+  projectId?: string
+): Promise<NarrationScriptOutput> {
+  const { profile, promptBlock } = buildPageProfileAndMemoryContext({
+    pageProfileId: brief.pageProfileId,
+    projectId,
+    agentRole: "scriptwriter_agent",
+  });
+
+  const voiceStyleNote =
+    profile?.voiceProfile.prosodyStyle ||
+    TONE_LABELS[brief.tone] ||
+    "گویندگی حرفه‌ای، گرم، طبیعی و شمرده فارسی";
+
+  const prompt = `شما «ایجنت ۱: نویسنده تخصصی متن گویندگی و آوانگار فارسی» هستید.
+بر اساس سناریوی تاییدشده زیر، متن دقیق گویندگی هماهنگ با تصویر را به زبان فارسی بنویسید و آن را برای موتور کلون صدا و گوینده صوتی به صورت کامل **اِعراب‌گذاری (ح حرکت‌گذاری فتحه َ، کسره ِ، ضمه ُ، تشدید ّ و کسره اضافه)** کنید تا حتی یک کلمه هم اشتباه تلفظ نشود!
+
+سناریوی تاییدشده:
+- عنوان: ${script.videoTitle}
+- قلاب: ${script.hook}
+- بدنه: ${script.body}
+- دعوت به اقدام: ${script.cta}
+- سبک بیان و صدای پیج: ${voiceStyleNote}
+- مدت‌زمان هدف: ${brief.targetDurationSeconds} ثانیه
+${promptBlock}
+${feedback ? `\nبازخورد اصلاحی کاربر روی متن گویندگی: ${feedback}` : ""}
+
+الزامات حیاتی متن گویندگی:
+۱. plainNarrationText: متن روان گویندگی بدون اعراب اضافی برای مطالعه سریع چشم.
+۲. vocalizedNarrationText: همان متن گویندگی با **اِعراب‌گذاری دقیق روی تمام کلمات هم‌نگاره، تخصصی، عربی/فنی و تمام کسره‌های اضافه بین مضاف و مضاف‌الیه** + نشانگرهای مکث دقیق مثل [مکث ۰.۴ ثانیه] یا [تاکید محکم] و نوشتن تمام اعداد به حروف فارسی.
+۳. pronunciationGuide: جدول ۴ تا ۶ کلمه کلیدی/حساس متن با شکل اعراب‌گذاری‌شده و نکته حس و استرس بیان.
+۴. rhythmAndPauseNotes: راهنمای ریتم تنفس، سرعت بیان در قلاب نسبت به بدنه و فرود پایانی.
+۵. emotionArcSummary: قوس احساسی صدا از ثانیه اول تا پایان ویدیو.`;
+
+  const routed = await executeAgentJsonWithRouter<NarrationScriptOutput>({
+    agentId: "voiceover",
+    prompt: `${prompt}\n\nخروجی باید یک JSON Object شامل کلیدهای دقیق زیر باشد:
+"plainNarrationText", "vocalizedNarrationText", "pronunciationGuide" (آرایه شامل word, vocalized, emotionOrStressNote), "rhythmAndPauseNotes", "emotionArcSummary", "estimatedSeconds", "wordCount".`,
+    systemInstruction:
+      "شما استاد فن بیان، گویندگی و آوانگاری زبان فارسی هستید. کسره‌های اضافه و حرکات فتحه/کسره/ضمه را روی کلمات حساس با دقت کامل قرار دهید تا موتور سنتز صدا هیچ خطای خوانشی نداشته باشد.",
+    expectedKeys: [
+      "plainNarrationText",
+      "vocalizedNarrationText",
+      "pronunciationGuide",
+      "rhythmAndPauseNotes",
+      "emotionArcSummary",
+      "estimatedSeconds",
+      "wordCount",
+    ],
+    googleResponseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        plainNarrationText: { type: Type.STRING },
+        vocalizedNarrationText: { type: Type.STRING },
+        pronunciationGuide: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              word: { type: Type.STRING },
+              vocalized: { type: Type.STRING },
+              emotionOrStressNote: { type: Type.STRING },
+            },
+            required: ["word", "vocalized", "emotionOrStressNote"],
+          },
+        },
+        rhythmAndPauseNotes: { type: Type.STRING },
+        emotionArcSummary: { type: Type.STRING },
+        estimatedSeconds: { type: Type.INTEGER },
+        wordCount: { type: Type.INTEGER },
+      },
+      required: [
+        "plainNarrationText",
+        "vocalizedNarrationText",
+        "pronunciationGuide",
+        "rhythmAndPauseNotes",
+        "emotionArcSummary",
+        "estimatedSeconds",
+        "wordCount",
+      ],
+    },
+  });
+
+  const data = routed.data;
+  const cleanWords = (data.plainNarrationText || "")
+    .replace(/\[[^\]]*\]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+
+  let candidate: NarrationScriptOutput = {
+    plainNarrationText: data.plainNarrationText || "",
+    vocalizedNarrationText: data.vocalizedNarrationText || data.plainNarrationText || "",
+    pronunciationGuide: Array.isArray(data.pronunciationGuide) ? data.pronunciationGuide : [],
+    rhythmAndPauseNotes: data.rhythmAndPauseNotes || "",
+    emotionArcSummary: data.emotionArcSummary || "",
+    estimatedSeconds: data.estimatedSeconds || brief.targetDurationSeconds,
+    wordCount: cleanWords || data.wordCount || 60,
+  };
+
+  let audit = auditNarrationOutput(candidate, brief, 1);
+  if (!audit.passed) {
+    const failedItems = audit.checks.filter((c) => !c.passed).map((c) => `${c.nameFa}: ${c.detailFa}`);
+    const fixes: string[] = [];
+    try {
+      const repairRes = await executeAgentJsonWithRouter<NarrationScriptOutput>({
+        agentId: "voiceover",
+        prompt: `متن گویندگی زیر در بازبینی فنی و قواعد خوانش فارسی خطا داشت. لطفاً این موارد را اصلاح کن:
+خطاها:
+${failedItems.join("\n")}
+
+متن فعلی:
+${JSON.stringify(candidate)}
+
+الزام: چگالی اعراب (فتحه َ، کسره ِ، ضمه ُ، تشدید ّ) و کسره اضافه را بیشتر کن، حتماً تگ‌های [مکث ۰.۴ ثانیه] را در نقاط تنفس بگذار، همه اعداد را به حروف فارسی بنویس و جدول تلفظ ۴ موردی بده.`,
+        systemInstruction:
+          "شما ویراستار ارشد آوانگاری و فن بیان فارسی هستید. تمام خطاهای اعراب‌گذاری، اعداد خام و مکث‌ها را برطرف کنید.",
+        expectedKeys: [
+          "plainNarrationText",
+          "vocalizedNarrationText",
+          "pronunciationGuide",
+          "rhythmAndPauseNotes",
+          "emotionArcSummary",
+          "estimatedSeconds",
+          "wordCount",
+        ],
+      });
+      fixes.push(`اصلاح خودکار اعراب، مکث یا تبدیل اعداد: ${audit.checks.filter((c) => !c.passed).map((c) => c.nameFa).join("، ")}`);
+      const repairedWords = (repairRes.data.plainNarrationText || candidate.plainNarrationText)
+        .replace(/\[[^\]]*\]/g, " ")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length;
+      candidate = {
+        ...candidate,
+        ...repairRes.data,
+        wordCount: repairedWords || candidate.wordCount,
+      };
+      audit = auditNarrationOutput(candidate, brief, 2, fixes);
+    } catch {
+      // Keep original candidate with audit attached
+    }
+  }
+
+  return {
+    ...candidate,
+    qaAudit: audit,
+  };
+}
+
+/**
+ * Super-Agent 2 (تیم ۵ نفره کارگردانی سینمایی — Stage 3A):
+ * Thinks like a full film crew (Showrunner, DOP, Art Director, Rhythm Editor, Sound Designer),
+ * breaking the scenario into strictly 3–8 second shots with full Production Bible specs.
+ */
+export async function runDirectorAgent(
+  script: ResearchAndScriptOutput,
+  narrationText: string,
+  brief: ProjectBrief,
+  feedback?: string,
+  projectId?: string
+): Promise<DirectorOutput> {
+  const { promptBlock } = buildPageProfileAndMemoryContext({
+    pageProfileId: brief.pageProfileId,
+    projectId,
+    agentRole: "director_agent",
+  });
+
+  const targetSec = clampDuration(brief.targetDurationSeconds, brief.contentFormat);
+  const minShots = Math.max(4, Math.ceil(targetSec / 7));
+  const maxShots = Math.min(10, Math.max(minShots + 1, Math.ceil(targetSec / 4.5)));
+
+  const formatName = brief.contentFormat
+    ? CONTENT_FORMAT_LABELS[brief.contentFormat]
+    : PLATFORM_LABELS[brief.platform] || "ویدیوی کوتاه";
+
+  const prompt = `شما «دپارتمان ۵ نفره کارگردانی حرفه‌ای استودیو» هستید (متشکل از: ۱. شورانر و کارگردان خلاق، ۲. مدیر فیلم‌برداری DOP، ۳. طراح صحنه و آکسسوار، ۴. تدوینگر ریتم سوشال مدیا، ۵. طراح صدا).
+سناریو خام و متن گویندگی زیر را نباید سطحی ببینید؛ باید دقیقاً مثل یک تیم فیلم‌برداری حرفه‌ای آن را پخت‌وپز کرده و به **${minShots} تا ${maxShots} شات ۳ تا ۸ ثانیه‌ای واقعی** با شناسنامه فنی کامل تبدیل کنید.
+
+عنوان ویدیو: ${script.videoTitle}
+فرمت و کادر: ${formatName}
+مدت‌زمان هدف کل ویدیو: حدود ${targetSec} ثانیه
+متن گویندگی تاییدشده:
+${narrationText}
+${promptBlock}
+${feedback ? `\nدستور اصلاحی کاربر روی دکوپاژ شات‌ها: ${feedback}` : ""}
+
+تکالیف الزامی تیم ۵ نفره کارگردانی:
+1) directingCrewNotes: یادداشت‌های دقیق ۵ بخش تیم برای یکپارچگی کل فیلم (showrunnerNoteFa, dopCinematographyNoteFa, artDirectionNoteFa, editorRhythmNoteFa, soundDesignNoteFa).
+2) قوانین هر شات داخل shots:
+   - durationSeconds: **اکیداً بین 3 تا 8 ثانیه**.
+   - dramaticBeatFa: نقش دراماتیک شات (مثلاً: «قلاب شوک اول»، «اثبات بصری»، «تست فنی»، «دعوت به اقدام»).
+   - microScenarioFa: **سناریوی دقیق و کامل همین شات** (در ثانیه اول چه اتفاقی می‌افتد، دست/سوژه چه حرکتی می‌کند و در پایان شات بیننده دقیقاً چه حقیقتی را می‌بیند).
+   - subjectAndActionFa: سوژه فیزیکی دقیق و اکشن مقابل دوربین.
+   - environmentAndPropsFa: لوکیشن واقعی، پس‌زمینه و ابزارهای صحنه (Props).
+   - lensAndFramingFa: نوع لنز (مثلاً Macro 85mm f/2.8 یا Wide 24mm)، زاویه و فضای منفی Safe-Zone برای زیرنویس ریلز.
+   - lightingRigFa: ستاپ دقیق نورپردازی (Key Light، Rim Light، دمای رنگ کلوین و کنتراست).
+   - continuityLockFa: قفل راکورد با شات قبلی و بعدی (تطابق رنگ لباس/محیط/سوژه و جهت حرکت).
+   - photorealPromptStartEn: پرامپت بسیار دقیق انگلیسی واقع‌گرایانه برای فریم ۱ (برای ComfyUI / Flux / HyperFrames — واقعی، فوتورئال، بدون واژه‌های فانتزی کارتونی).
+   - photorealPromptEndEn: پرامپت دقیق انگلیسی واقع‌گرایانه برای فریم ۲ (نمایش اوج حرکت دوربین یا نتیجه اکشن).
+   - negativePromptEn: موارد ممنوعه (cartoon, blurry, plastic texture, distorted fingers, extra limbs, watermark).
+   - recommendedEngine: بهترین موتور رندر سبک برای این شات ("hyperframes_html" | "comfyui_light" | "remotion_kinetic" | "blender_headless" | "ffmpeg_cinema").
+   - startFrameDescriptionFa و endFrameDescriptionFa: توصیف دقیق فریم ۱ و فریم ۲ به فارسی.
+   - onScreenText: زیرنویس کوبنده حداکثر ۶ کلمه فارسی (برای ناحیه امن ریلز).`;
+
+  const shotSchemaProps = {
+    shotNumber: { type: Type.INTEGER },
+    timecode: { type: Type.STRING },
+    durationSeconds: { type: Type.INTEGER },
+    cameraAngle: { type: Type.STRING },
+    cameraMovement: { type: Type.STRING },
+    sceneDescriptionFa: { type: Type.STRING },
+    startFrameDescriptionFa: { type: Type.STRING },
+    endFrameDescriptionFa: { type: Type.STRING },
+    spokenSegment: { type: Type.STRING },
+    onScreenText: { type: Type.STRING },
+    sfxCueFa: { type: Type.STRING },
+    transitionToNext: {
+      type: Type.STRING,
+      enum: ["cut", "cross_dissolve", "whip_pan", "zoom_in"],
+    },
+    lightingAndMood: { type: Type.STRING },
+    visualPromptFa: { type: Type.STRING },
+    dramaticBeatFa: { type: Type.STRING },
+    microScenarioFa: { type: Type.STRING },
+    subjectAndActionFa: { type: Type.STRING },
+    environmentAndPropsFa: { type: Type.STRING },
+    lensAndFramingFa: { type: Type.STRING },
+    lightingRigFa: { type: Type.STRING },
+    continuityLockFa: { type: Type.STRING },
+    photorealPromptStartEn: { type: Type.STRING },
+    photorealPromptEndEn: { type: Type.STRING },
+    negativePromptEn: { type: Type.STRING },
+    recommendedEngine: {
+      type: Type.STRING,
+      enum: ["hyperframes_html", "comfyui_light", "remotion_kinetic", "blender_headless", "ffmpeg_cinema"],
+    },
+  };
+
+  const routedDirector = await executeAgentJsonWithRouter<DirectorOutput>({
+    agentId: "director",
+    prompt: `${prompt}\n\nخروجی باید یک JSON Object دقیق شامل "visualDirectionSummary", "totalEstimatedSeconds", "directingCrewNotes" و آرایه "shots" باشد.`,
+    systemInstruction:
+      "شما تیم ۵ نفره کارگردانی سینمایی هستید. تمام شات‌ها باید ۳ تا ۸ ثانیه باشند و سناریوی خرد، لنز، نورپردازی، راکورد و پرامپت فوتورئال انگلیسی کامل داشته باشند.",
+    expectedKeys: ["visualDirectionSummary", "totalEstimatedSeconds", "directingCrewNotes", "shots"],
+    googleResponseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        visualDirectionSummary: { type: Type.STRING },
+        totalEstimatedSeconds: { type: Type.INTEGER },
+        directingCrewNotes: {
+          type: Type.OBJECT,
+          properties: {
+            showrunnerNoteFa: { type: Type.STRING },
+            dopCinematographyNoteFa: { type: Type.STRING },
+            artDirectionNoteFa: { type: Type.STRING },
+            editorRhythmNoteFa: { type: Type.STRING },
+            soundDesignNoteFa: { type: Type.STRING },
+          },
+          required: [
+            "showrunnerNoteFa",
+            "dopCinematographyNoteFa",
+            "artDirectionNoteFa",
+            "editorRhythmNoteFa",
+            "soundDesignNoteFa",
+          ],
+        },
+        shots: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: shotSchemaProps,
+            required: [
+              "shotNumber",
+              "timecode",
+              "durationSeconds",
+              "cameraAngle",
+              "cameraMovement",
+              "sceneDescriptionFa",
+              "startFrameDescriptionFa",
+              "endFrameDescriptionFa",
+              "spokenSegment",
+              "onScreenText",
+              "sfxCueFa",
+              "transitionToNext",
+              "lightingAndMood",
+              "visualPromptFa",
+              "microScenarioFa",
+              "lensAndFramingFa",
+              "lightingRigFa",
+              "continuityLockFa",
+              "photorealPromptStartEn",
+              "photorealPromptEndEn",
+            ],
+          },
+        },
+      },
+      required: ["visualDirectionSummary", "totalEstimatedSeconds", "directingCrewNotes", "shots"],
+    },
+  });
+
+  const enrichShotSpecs = (s: DirectorShot): DirectorShot => ({
+    ...s,
+    dramaticBeatFa: s.dramaticBeatFa || (s.shotNumber === 1 ? "قلاب بصری ثانیه اول" : "پیشبرد بصری سناریو"),
+    microScenarioFa: s.microScenarioFa || s.sceneDescriptionFa,
+    subjectAndActionFa: s.subjectAndActionFa || s.sceneDescriptionFa,
+    environmentAndPropsFa: s.environmentAndPropsFa || "صحنه واقعی متناسب با موضوع و ابزار کار",
+    lensAndFramingFa: s.lensAndFramingFa || `${s.cameraAngle} · 35mm f/2.0 (فضای پایین امن برای زیرنویس)`,
+    lightingRigFa: s.lightingRigFa || s.lightingAndMood,
+    continuityLockFa: s.continuityLockFa || "ثبات رنگ پوست/متریال، کلوین نور ۴۵۰۰ و زاویه محور ۱۸۰ درجه",
+    photorealPromptStartEn:
+      s.photorealPromptStartEn ||
+      `Photorealistic vertical 9:16 commercial cinematography, ${s.visualPromptFa || s.sceneDescriptionFa}, natural workshop lighting, crisp focus, 8k RAW photo`,
+    photorealPromptEndEn:
+      s.photorealPromptEndEn ||
+      `Photorealistic vertical 9:16 camera ${s.cameraMovement || "push-in"}, ${s.endFrameDescriptionFa || s.sceneDescriptionFa}, shallow depth of field`,
+    negativePromptEn:
+      s.negativePromptEn || "cartoon, anime, abstract shapes, blurry, low quality, distorted hands, watermark",
+    recommendedEngine: (s.recommendedEngine || "hyperframes_html") as LocalVideoEngineId,
+  });
+
+  const normalized = normalizeDirectorShots3To8s((routedDirector.data.shots ?? []).map(enrichShotSpecs));
+  const crewNotes: DirectingCrewNotes = routedDirector.data.directingCrewNotes || {
+    showrunnerNoteFa: "ریتم سریع ۳ تا ۶ ثانیه‌ای برای نگهداشت مخاطب از ثانیه اول تا پایان CTA.",
+    dopCinematographyNoteFa: "کادر ۹:۱۶ عمودی با ترکیب کلوزآپ ماکرو و حرکت نرم دوربین روی محور سوژه.",
+    artDirectionNoteFa: "بافت واقعی صحنه بدون المان‌های تزئینی بی‌ربط؛ کنتراست سوژه با پس‌زمینه.",
+    editorRhythmNoteFa: "کات‌های دقیق روی ضرب‌آهنگ گفتار و تغییر زاویه محسوس در هر برش.",
+    soundDesignNoteFa: "افکت‌های محیطی واقعی، Whoosh انتقال نرم و تراز -14 LUFS.",
+  };
+
+  let directorOutput: DirectorOutput = {
+    visualDirectionSummary:
+      routedDirector.data.visualDirectionSummary ||
+      "کارگردانی کنتراست بالا با کات‌های ریتمیک ۳ تا ۶ ثانیه‌ای",
+    totalEstimatedSeconds: normalized.totalEstimatedSeconds,
+    directingCrewNotes: crewNotes,
+    shots: normalized.shots,
+  };
+
+  const fixes: string[] = [];
+  let audit = auditDirectorCrewPlan(directorOutput, 1);
+  if (!audit.passed) {
+    // Self-heal caption length or missing fields deterministically so Stage 3 always meets Production Bible rules
+    const fixedShots = directorOutput.shots.map((s) => {
+      const capWords = (s.onScreenText || "").trim().split(/\s+/).filter(Boolean);
+      const trimmedCap = capWords.length > 8 ? capWords.slice(0, 7).join(" ") : s.onScreenText;
+      return enrichShotSpecs({ ...s, onScreenText: trimmedCap });
+    });
+    fixes.push("بهینه‌سازی خودکار طول زیرنویس‌های روی تصویر (Safe-Zone) و تکمیل شناسنامه فنی شات‌ها.");
+    directorOutput = {
+      ...directorOutput,
+      shots: fixedShots,
+    };
+    audit = auditDirectorCrewPlan(directorOutput, 2, fixes);
+  }
+
+  return {
+    ...directorOutput,
+    qaAudit: audit,
+  };
+}
+
+/**
+ * Super-Agent 2 (ایجنت کارگردان — Stage 3B):
+ * Renders TWO distinct realistic raster PNG preview frames per shot using HyperFrames HTML5 / ComfyUI Light,
+ * then inspects every generated frame with Multimodal Vision QA + automatic self-healing retry!
+ */
+export async function runVisualProducerBatch(
+  projectId: string,
+  shots: DirectorShot[],
+  directionSummary: string,
+  feedback?: string
+): Promise<VisualAssetShot[]> {
+  const results: VisualAssetShot[] = [];
+
+  for (const shot of shots) {
+    const effectiveShot: DirectorShot = feedback?.trim()
+      ? {
+          ...shot,
+          visualPromptFa: `${shot.visualPromptFa} (${feedback.trim()})`,
+        }
+      : shot;
+
+    try {
+      const fixesApplied: string[] = [];
+      let frames = await renderHyperFramesDualKeyframes({
+        projectId,
+        shot: effectiveShot,
+        directionSummary,
+        width: 540,
+        height: 960,
+      });
+
+      let qaAudit = await runMultimodalVisionFrameQA({
+        imagePath: frames.frame1Path,
+        shot: effectiveShot,
+        frameRole: "frame1_start",
+        targetW: 540,
+        targetH: 960,
+        attemptsRun: 1,
+        fixesAppliedFa: fixesApplied,
+      });
+
+      // Self-Healing Loop: if Vision/Technical QA reports an issue, adjust prompt/layout & re-render
+      if (!qaAudit.passed) {
+        const reason = qaAudit.autoFixPromptFa || "تقویت کنتراست سوژه و خوانایی در محدوده امن";
+        fixesApplied.push(`اصلاح خودکار فریم پس از بازبینی بینایی: ${reason}`);
+        const healedShot: DirectorShot = {
+          ...effectiveShot,
+          lightingRigFa: `${effectiveShot.lightingRigFa || effectiveShot.lightingAndMood} · کنتراست بالا`,
+          microScenarioFa: `${effectiveShot.microScenarioFa || effectiveShot.sceneDescriptionFa} (${reason})`,
+        };
+        frames = await renderHyperFramesDualKeyframes({
+          projectId,
+          shot: healedShot,
+          directionSummary,
+          width: 540,
+          height: 960,
+        });
+        qaAudit = await runMultimodalVisionFrameQA({
+          imagePath: frames.frame1Path,
+          shot: healedShot,
+          frameRole: "frame1_start",
+          targetW: 540,
+          targetH: 960,
+          attemptsRun: 2,
+          fixesAppliedFa: fixesApplied,
+        });
+      }
+
+      results.push({
+        shotNumber: shot.shotNumber,
+        imageUrl: frames.imageUrl,
+        secondaryImageUrl: frames.secondaryImageUrl,
+        motionCue: shot.cameraMovement || "حرکت نرم دوربین",
+        colorPaletteNote: shot.lightingRigFa || shot.lightingAndMood || "پالت سینمایی",
+        generatorEngine: shot.recommendedEngine || "hyperframes_html",
+        qaAudit,
+        status: "ready",
+        error: null,
+      });
+    } catch (err) {
+      results.push({
+        shotNumber: shot.shotNumber,
+        imageUrl: null,
+        secondaryImageUrl: null,
+        motionCue: shot.cameraMovement || "زوم نرم",
+        colorPaletteNote: shot.lightingAndMood || "کنتراست سینمایی",
+        generatorEngine: "hyperframes_html",
+        qaAudit: null,
+        status: "error",
+        error: formatGeminiError(err),
+      });
+    }
+  }
+
+  return results;
+}
+
+export async function runVisualProducerForShot(
+  projectId: string,
+  shot: DirectorShot,
+  directionSummary: string,
+  feedback?: string
+): Promise<VisualAssetShot> {
+  const [result] = await runVisualProducerBatch(projectId, [shot], directionSummary, feedback);
+  return result;
+}
+
+/**
+ * Super-Agent 2 (ایجنت کارگردان — Stage 5: Voice Clone & Persian Diacritic Synthesis):
+ * Uses the Page Profile's recorded/uploaded voice reference + vocalized Persian script
+ * to synthesize clean 24kHz WAV narration via free-tier Gemini TTS (plus XTTS-v2/F5-TTS desktop metadata).
  */
 export async function runVoiceoverAgent(
   projectId: string,
   script: ResearchAndScriptOutput,
   brief: ProjectBrief,
-  voiceName: VoicePersona = "Kore",
+  voiceName?: VoicePersona,
   voiceStyle?: string,
   feedback?: string,
   existingNarrationText?: string,
-  director?: DirectorOutput | null
+  narrationRecord?: NarrationScriptOutput | null
 ): Promise<VoiceoverOutput> {
-  const toneName = TONE_LABELS[brief.tone];
+  const profile = getPageProfile(brief.pageProfileId);
+  const resolvedVoice: VoicePersona =
+    voiceName || profile?.voiceProfile.voicePersona || "Charon";
+  const resolvedStyle =
+    voiceStyle?.trim() ||
+    profile?.voiceProfile.prosodyStyle ||
+    `${TONE_LABELS[brief.tone]} — بیان دقیق کسره‌های اضافه و مکث‌های طبیعی فارسی`;
 
-  let narrationText = existingNarrationText?.trim() ?? "";
-  let resolvedStyle = voiceStyle?.trim() || "گوینده حرفه‌ای، گرم، رسا و پرانرژی فارسی";
-  let pacingNotes = "مکث کوتاه بعد از قلاب برای جلب توجه، ریتم پیوسته و تاکید روی اعداد کلیدی.";
-  let estimatedSeconds: number = director?.totalEstimatedSeconds || brief.targetDurationSeconds;
+  const sourceVocalized =
+    existingNarrationText?.trim() ||
+    narrationRecord?.vocalizedNarrationText?.trim() ||
+    `${script.hook} [مکث ۰.۴ ثانیه] ${script.body} [مکث ۰.۳ ثانیه] ${script.cta}`;
 
-  if (!narrationText) {
-    const shotsCue =
-      director && director.shots.length > 0
-        ? `\nبرنامه زمان‌بندی شات‌های ویدیو (نریشن را دقیقاً هماهنگ با زمان این ${director.shots.length} شات تنظیم کن):\n${director.shots
-            .map(
-              (s) =>
-                `- شات ${s.shotNumber} (${s.timecode} · ${s.durationSeconds}s): ${s.spokenSegment || s.sceneDescriptionFa}`
-            )
-            .join("\n")}`
-        : "";
+  let finalVocalized = sourceVocalized;
+  let pacingNotes =
+    narrationRecord?.rhythmAndPauseNotes ||
+    "مکث کوتاه پس از قلاب، شمرده‌خوانی کلمات تخصصی اعراب‌گذاری‌شده و فرود مطمئن در پایان.";
+  const estimatedSeconds = narrationRecord?.estimatedSeconds || brief.targetDurationSeconds;
 
-    const adaptPrompt = `شما ایجنت گوینده و کارگردان صدای حرفه‌ای فارسی هستید.
-سناریوی زیر را برای خوانش صوتی (Voiceover) آماده کنید تا روی ریتم ${estimatedSeconds} ثانیه‌ای شات‌های ویدیو کاملاً طبیعی، محاوره‌ای-استاندارد و تاثیرگذار شنیده شود.
-
-عنوان: ${script.videoTitle}
-لحن هدف: ${toneName}
-قلاب: ${script.hook}
-بدنه: ${script.body}
-دعوت به اقدام: ${script.cta}${shotsCue}
-${feedback ? `بازخورد اصلاحی کاربر: ${feedback}` : ""}
-
-نکات مهم:
-- متن نریشن را یکدست و آماده خوانش بنویسید.
-- برای تنظیم مکث‌های تنفس و تاکید، در نقاط مناسب از نشانگرهایی مانند [مکث کوتاه] یا [مکث ۰.۵ ثانیه] استفاده کنید.
-- تمام اعداد را به‌صورت حروفی و روان برای تلفظ صحیح گوینده بنویسید.`;
-
-    const routedAdapt = await executeAgentJsonWithRouter<{
-      narrationText: string;
-      voiceStyle: string;
-      estimatedSeconds: number;
-      pacingNotes: string;
-    }>({
-      agentId: "voiceover",
-      prompt: `${adaptPrompt}\n\nخروجی باید JSON شامل کلیدهای زیر باشد: "narrationText", "voiceStyle", "estimatedSeconds", "pacingNotes".`,
-      expectedKeys: ["narrationText", "voiceStyle", "estimatedSeconds", "pacingNotes"],
-      googleResponseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          narrationText: { type: Type.STRING, description: "متن کامل نریشن آماده خوانش با نشانگرهای مکث به فارسی" },
-          voiceStyle: { type: Type.STRING, description: "توضیح سبک و حس اجرای صدا" },
-          estimatedSeconds: { type: Type.INTEGER, description: "مدت زمان تخمینی خوانش به ثانیه" },
-          pacingNotes: { type: Type.STRING, description: "راهنمای ریتم، تاکیدها و لحن گوینده" },
-        },
-        required: ["narrationText", "voiceStyle", "estimatedSeconds", "pacingNotes"],
-      },
-    });
-
-    const parsed = routedAdapt.data;
-    narrationText = parsed.narrationText;
-    resolvedStyle = voiceStyle?.trim() || parsed.voiceStyle;
-    estimatedSeconds = parsed.estimatedSeconds || brief.targetDurationSeconds;
-    pacingNotes = parsed.pacingNotes;
+  if (feedback?.trim()) {
+    const adapted = await runNarrationScriptAgent(script, brief, feedback, projectId);
+    finalVocalized = adapted.vocalizedNarrationText;
+    pacingNotes = adapted.rhythmAndPauseNotes;
   }
 
-  const cleanSpeechText = narrationText
+  const cleanSpeechText = finalVocalized
     .replace(/\[[^\]]*\]/g, " ... ")
     .replace(/\s+/g, " ")
     .trim();
@@ -753,486 +1182,216 @@ ${feedback ? `بازخورد اصلاحی کاربر: ${feedback}` : ""}
           responseModalities: ["AUDIO"],
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
+              prebuiltVoiceConfig: { voiceName: resolvedVoice },
             },
           },
         },
       })
     );
 
-    const base64Audio = ttsRes.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
+    const base64Audio = ttsRes.candidates?.[0]?.content?.parts?.find(
+      (p) => p.inlineData?.data
+    )?.inlineData?.data;
+
     if (base64Audio) {
+      // Unary gemini-3.8-flash-lite-tts returns a complete 24kHz 16-bit mono WAV directly
       const wavBuffer = Buffer.from(base64Audio, "base64");
       audioFilename = `${projectId}_vo_${Date.now()}.wav`;
       audioUrl = saveAudioFile(audioFilename, wavBuffer);
     } else {
-      audioError = "مدل TTS داده صوتی برنگرداند؛ متن نریشن آماده است و می‌توانید دوباره تلاش کنید.";
+      audioError = "مدل صوتی داده WAV برنگرداند؛ می‌توانید دوباره دکمه تولید صدا را بزنید.";
     }
   } catch (err) {
     audioError = formatGeminiError(err);
   }
 
+  const cloneEngineNote = profile?.voiceProfile.sampleAudioUrl
+    ? `متصل به نمونه صدای مرجع «${profile.voiceProfile.speakerName}» (سنتز ابری رایگان + آماده کلون ۱۰۰٪ آفلاین XTTS-v2 در نسخه ویندوز)`
+    : `پرسونای صوتی استاندارد استودیو (${resolvedVoice}) با رعایت کامل اعراب‌گذاری فارسی`;
+
+  const wavDiskPath = audioFilename ? path.join(getAudioDir(), audioFilename) : null;
+  const qaAudit = await auditVoiceoverAudioWav({
+    wavPath: wavDiskPath,
+    wordCount,
+    targetDurationSec: estimatedSeconds,
+    audioError,
+  });
+
   return {
-    narrationText,
-    voiceName,
+    narrationText: narrationRecord?.plainNarrationText || finalVocalized,
+    vocalizedText: finalVocalized,
+    voiceName: resolvedVoice,
     voiceStyle: resolvedStyle,
+    referenceSampleUrl: profile?.voiceProfile.sampleAudioUrl ?? null,
+    cloneEngineNote,
     estimatedSeconds,
     wordCount,
     pacingNotes,
     audioUrl,
     audioFilename,
     audioError,
+    qaAudit,
   };
 }
 
 /**
- * Agent 2: Director / Storyboard Decoupage Agent (runs before Voiceover in studio order)
+ * Grounded Competitor & Weekly Viral Radar (100% Safe Public Web Grounding — Zero Account Login/Scraping Risk)
  */
-export async function runDirectorAgent(
-  script: ResearchAndScriptOutput,
-  voiceover: VoiceoverOutput | null | undefined,
-  brief: ProjectBrief,
-  feedback?: string
-): Promise<DirectorOutput> {
-  const desiredShotCount = brief.targetDurationSeconds <= 30 ? "۵ تا ۶" : brief.targetDurationSeconds <= 45 ? "۶ تا ۷" : "۷ تا ۸";
+export async function runCompetitorAndViralRadar(params: {
+  nicheQuery: string;
+  platform: PlatformOption;
+  pageProfileId?: string | null;
+}): Promise<CompetitorViralReport> {
+  const profile = getPageProfile(params.pageProfileId);
+  const platformName = PLATFORM_LABELS[params.platform] || PLATFORM_LABELS.instagram;
+  const competitorHint = profile?.competitorHandles.length
+    ? `رقبای ثبت‌شده در پروفایل پیج: ${profile.competitorHandles.join(" ، ")}`
+    : "";
 
-  const formatName = brief.contentFormat
-    ? CONTENT_FORMAT_LABELS[brief.contentFormat]
-    : PLATFORM_LABELS[brief.platform] || "ویدیوی کوتاه";
+  let webResearch = "";
+  const sources: GroundedSource[] = [];
 
-  const referenceScriptText =
-    voiceover?.narrationText?.trim() ||
-    `قلاب (Hook): ${script.hook}\nبدنه اصلی: ${script.body}\nدعوت به اقدام (CTA): ${script.cta}`;
+  try {
+    const ai = getClient();
+    const searchRes = await generateWithModelFallback(ai, {
+      contents: `تحلیل رقبا، الگوهای پست‌های وایرال اخیر و قوانین به‌روز الگوریتم ${platformName} در حوزه «${params.nicheQuery}»:
+${competitorHint}
+۱) پیج‌ها یا کانال‌های شاخص این حوزه چه فرمول قلابی اجرا می‌کنند و چه شکاف محتوایی (Content Gap) برای یک پیج جدید/درحال‌رشد وجود دارد؟
+۲) ۵ الگوی پست وایرال پربازدید این هفته/ماه در این حوزه چه ساختار قلاب، ریتم تدوین و مکانیزم نگهداشت مخاطب (Retention) دارند؟
+۳) چه اشتباهاتی باعث افت بازدید، خروج از اکسپلور یا شادوبن شدن پیج در این حوزه می‌شود؟`,
+      config: {
+        tools: [{ googleSearch: {} }],
+      },
+    });
+    webResearch = searchRes.text ?? "";
+    const seen = new Set<string>();
+    for (const chunk of searchRes.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
+      if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
+        seen.add(chunk.web.uri);
+        sources.push({
+          title: chunk.web.title || chunk.web.uri,
+          uri: chunk.web.uri,
+        });
+      }
+    }
+  } catch {
+    webResearch = `بررسی استراتژیک حوزه ${params.nicheQuery} در ${platformName}`;
+  }
 
-  const prompt = `شما کارگردان و طراح استوری‌بورد و دکوپاژ حرفه‌ای محتوای شبکه‌های اجتماعی هستید.
-بر اساس سناریوی تاییدشده، کل محتوا را متناسب با فرمت «${formatName}» به ${desiredShotCount} شات/فریم دقیق و سینمایی بشکنید.
-تمام خروجی‌ها باید به زبان فارسی دقیق و حرفه‌ای باشد.
+  const routed = await executeAgentJsonWithRouter<{
+    executiveSummary: string;
+    safeResearchMethodNote: string;
+    competitors: CompetitorViralReport["competitors"];
+    weeklyTopViralPatterns: CompetitorViralReport["weeklyTopViralPatterns"];
+    algorithmRulesAndRedLines: string[];
+  }>({
+    agentId: "research_script",
+    prompt: `شما تحلیلگر ارشد رقبا و مهندس الگوریتم ${platformName} هستید. بر اساس پژوهش وب زیر، یک گزارش عملیاتی دقیق به فارسی تولید کنید:
 
-عنوان ویدیو: ${script.videoTitle}
-پلتفرم: ${PLATFORM_LABELS[brief.platform] || brief.platform} (${formatName})
-مدت‌زمان هدف: ${brief.targetDurationSeconds} ثانیه
-متن سناریو و گفتار:
-${referenceScriptText}
-${feedback ? `بازخورد اصلاحی کاربر برای استوری‌بورد و دکوپاژ: ${feedback}` : ""}
+حوزه بررسی: ${params.nicheQuery}
+پلتفرم: ${platformName}
+${competitorHint}
+یافته‌های وب:
+${webResearch}
 
-الزامات هر شات:
-- shotNumber: شماره ترتیبی شات (۱، ۲، ...)
-- timecode: بازه زمانی دقیق به فرمت "00:00 - 00:05"
-- durationSeconds: مدت زمان شات به ثانیه
-- cameraAngle: زاویه و قاب دوربین به فارسی
-- cameraMovement: حرکت دوربین به فارسی
-- sceneDescriptionFa: شرح کامل صحنه، سوژه، پس‌زمینه و اکشن داخل کادر به فارسی
-- spokenSegment: بخش دقیق نریشن که در این شات شنیده می‌شود
-- onScreenText: متن کوتاه و کوبنده زیرنویس یا تیتر روی تصویر (حداکثر ۵ کلمه فارسی)
-- lightingAndMood: نورپردازی و اتمسفر رنگی صحنه به فارسی
-- visualPromptFa: دستور تصویرسازی دقیق و غنی به فارسی برای ساخت استوری‌بورد شات`;
-
-  const routedDirector = await executeAgentJsonWithRouter<DirectorOutput>({
-    agentId: "director",
-    prompt: `${prompt}\n\nخروجی باید یک JSON Object دقیق شامل کلیدهای "visualDirectionSummary", "totalEstimatedSeconds" و آرایه "shots" (دارای shotNumber, timecode, durationSeconds, cameraAngle, cameraMovement, sceneDescriptionFa, spokenSegment, onScreenText, lightingAndMood, visualPromptFa) باشد.`,
-    systemInstruction:
-      "شما کارگردان تصویربرداری و دکوپاژ هستید. مجموع durationSeconds شات‌ها باید نزدیک به مدت‌زمان هدف ویدیو باشد و زمان‌بندی‌ها کاملاً پیوسته و بدون همپوشانی باشند.",
-    expectedKeys: ["visualDirectionSummary", "totalEstimatedSeconds", "shots"],
+خروجی باید یک JSON Object دقیق شامل کلیدهای زیر باشد:
+- executiveSummary: خلاصه مدیریتی و نقشه برنده شدن در این حوزه (۲ تا ۳ جمله کوبنده).
+- safeResearchMethodNote: توضیح کوتاه درباره اینکه این تحلیل با جستجوی عمومی وب و بدون لاگین رباتیک در اکانت شخصی انجام شده تا خطر شادوبن صفر باشد.
+- competitors: آرایه ۳ تا ۴ رقیب/تیپ پیج شاخص شامل nameOrHandle, platform, coreStrength, winningHookFormula, weaknessOrGapForUs.
+- weeklyTopViralPatterns: آرایه ۴ تا ۵ الگوی وایرال برتر هفته شامل rank, patternTitle, hookStructureFa, retentionMechanismFa, visualRhythmNote, whyItWentViral.
+- algorithmRulesAndRedLines: آرایه ۴ تا ۵ قانون طلایی الگوریتم و خط قرمزهایی که از افت بازدید پیج جلوگیری می‌کند.`,
+    expectedKeys: [
+      "executiveSummary",
+      "safeResearchMethodNote",
+      "competitors",
+      "weeklyTopViralPatterns",
+      "algorithmRulesAndRedLines",
+    ],
     googleResponseSchema: {
       type: Type.OBJECT,
       properties: {
-        visualDirectionSummary: {
-          type: Type.STRING,
-          description: "خلاصه کارگردانی بصری، ریتم تدوین و هویت رنگی کل ویدیو به فارسی",
-        },
-        totalEstimatedSeconds: {
-          type: Type.INTEGER,
-          description: "مجموع کل ثانیه‌های شات‌ها",
-        },
-        shots: {
+        executiveSummary: { type: Type.STRING },
+        safeResearchMethodNote: { type: Type.STRING },
+        competitors: {
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
             properties: {
-              shotNumber: { type: Type.INTEGER },
-              timecode: { type: Type.STRING },
-              durationSeconds: { type: Type.INTEGER },
-              cameraAngle: { type: Type.STRING },
-              cameraMovement: { type: Type.STRING },
-              sceneDescriptionFa: { type: Type.STRING },
-              spokenSegment: { type: Type.STRING },
-              onScreenText: { type: Type.STRING },
-              lightingAndMood: { type: Type.STRING },
-              visualPromptFa: { type: Type.STRING },
+              nameOrHandle: { type: Type.STRING },
+              platform: { type: Type.STRING },
+              coreStrength: { type: Type.STRING },
+              winningHookFormula: { type: Type.STRING },
+              weaknessOrGapForUs: { type: Type.STRING },
             },
             required: [
-              "shotNumber",
-              "timecode",
-              "durationSeconds",
-              "cameraAngle",
-              "cameraMovement",
-              "sceneDescriptionFa",
-              "spokenSegment",
-              "onScreenText",
-              "lightingAndMood",
-              "visualPromptFa",
+              "nameOrHandle",
+              "platform",
+              "coreStrength",
+              "winningHookFormula",
+              "weaknessOrGapForUs",
             ],
           },
         },
+        weeklyTopViralPatterns: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              rank: { type: Type.INTEGER },
+              patternTitle: { type: Type.STRING },
+              hookStructureFa: { type: Type.STRING },
+              retentionMechanismFa: { type: Type.STRING },
+              visualRhythmNote: { type: Type.STRING },
+              whyItWentViral: { type: Type.STRING },
+            },
+            required: [
+              "rank",
+              "patternTitle",
+              "hookStructureFa",
+              "retentionMechanismFa",
+              "visualRhythmNote",
+              "whyItWentViral",
+            ],
+          },
+        },
+        algorithmRulesAndRedLines: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+        },
       },
-      required: ["visualDirectionSummary", "totalEstimatedSeconds", "shots"],
+      required: [
+        "executiveSummary",
+        "safeResearchMethodNote",
+        "competitors",
+        "weeklyTopViralPatterns",
+        "algorithmRulesAndRedLines",
+      ],
     },
   });
 
-  return routedDirector.data;
-}
-
-function wrapStoryboardSvg(innerElements: string, shot: DirectorShot, palette: [string, string, string]): string {
-  const safeInner = innerElements
-    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
-    .replace(/on\w+="[^"]*"/gi, "");
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 640" width="360" height="640">
-  <defs>
-    <linearGradient id="bg_${shot.shotNumber}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="${palette[0]}" />
-      <stop offset="55%" stop-color="${palette[1]}" />
-      <stop offset="100%" stop-color="${palette[2]}" />
-    </linearGradient>
-    <radialGradient id="spot_${shot.shotNumber}" cx="50%" cy="38%" r="55%">
-      <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.28" />
-      <stop offset="100%" stop-color="#0B0D11" stop-opacity="0" />
-    </radialGradient>
-  </defs>
-  <rect width="360" height="640" fill="url(#bg_${shot.shotNumber})" />
-  <rect width="360" height="640" fill="url(#spot_${shot.shotNumber})" />
-  <g id="scene-art">${safeInner}</g>
-  <g stroke="#FFFFFF" stroke-opacity="0.11" stroke-width="1" stroke-dasharray="4 4">
-    <line x1="120" y1="24" x2="120" y2="616" />
-    <line x1="240" y1="24" x2="240" y2="616" />
-    <line x1="18" y1="213" x2="342" y2="213" />
-    <line x1="18" y1="426" x2="342" y2="426" />
-  </g>
-  <g stroke="#F59E0B" stroke-opacity="0.65" stroke-width="2" fill="none">
-    <path d="M18 42 L18 18 L42 18" />
-    <path d="M318 18 L342 18 L342 42" />
-    <path d="M18 598 L18 622 L42 622" />
-    <path d="M318 622 L342 622 L342 598" />
-  </g>
-</svg>`;
-}
-
-function buildFallbackStoryboardShot(projectId: string, shot: DirectorShot, err?: unknown): VisualAssetShot {
-  const variant = shot.shotNumber % 3;
-  const fallbackElements =
-    variant === 1
-      ? `<circle cx="180" cy="240" r="78" fill="#F59E0B" fill-opacity="0.14" stroke="#F59E0B" stroke-width="2"/>
-         <path d="M95 430 Q180 310 265 430 Z" fill="#1E293B" stroke="#94A3B8" stroke-width="2"/>
-         <line x1="180" y1="120" x2="180" y2="160" stroke="#F59E0B" stroke-width="2"/>`
-      : variant === 2
-        ? `<rect x="52" y="130" width="256" height="310" rx="14" fill="#14171F" stroke="#334155" stroke-width="2"/>
-           <circle cx="180" cy="255" r="54" fill="#F59E0B" fill-opacity="0.2" stroke="#F59E0B" stroke-width="2"/>
-           <path d="M72 395 L150 320 L215 365 L288 290" stroke="#F59E0B" stroke-width="2.5" fill="none"/>`
-        : `<polygon points="180,145 275,320 85,320" fill="#1E293B" fill-opacity="0.7" stroke="#F59E0B" stroke-width="2"/>
-           <rect x="65" y="345" width="230" height="80" rx="8" fill="#0F172A" stroke="#475569" stroke-width="1.5"/>`;
-
-  const fullSvg = wrapStoryboardSvg(fallbackElements, shot, ["#0F172A", "#161B26", "#090B10"]);
-  const filename = `${projectId}_shot_${shot.shotNumber}_${Date.now()}.svg`;
-  const imageUrl = saveVisualSvgFile(filename, fullSvg);
-
   return {
-    shotNumber: shot.shotNumber,
-    imageUrl,
-    svgMarkup: fullSvg,
-    motionCue: shot.cameraMovement || "زوم نرم به مرکز کادر",
-    colorPaletteNote: shot.lightingAndMood || "پالت سینمایی تیره با نور تاکیدی کهربایی",
-    status: "ready",
-    error: err ? formatGeminiError(err) : null,
+    id: `viral_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    pageProfileId: params.pageProfileId ?? null,
+    nicheQuery: params.nicheQuery,
+    platform: params.platform,
+    analyzedAt: new Date().toISOString(),
+    executiveSummary: routed.data.executiveSummary,
+    safeResearchMethodNote:
+      routed.data.safeResearchMethodNote ||
+      "تحلیل ۱۰۰٪ ایمن از طریق ایندکس عمومی وب بدون اتصال ربات یا رمز عبور به پیج شما (ریسک بلاک و شادوبن: صفر).",
+    competitors: Array.isArray(routed.data.competitors) ? routed.data.competitors : [],
+    weeklyTopViralPatterns: Array.isArray(routed.data.weeklyTopViralPatterns)
+      ? routed.data.weeklyTopViralPatterns
+      : [],
+    algorithmRulesAndRedLines: Array.isArray(routed.data.algorithmRulesAndRedLines)
+      ? routed.data.algorithmRulesAndRedLines
+      : [],
+    sources: sources.slice(0, 8),
   };
 }
 
 /**
- * Agent 4 (Batch): Generate all storyboard shots in ONE single Gemini request to save quota!
- */
-export async function runVisualProducerBatch(
-  projectId: string,
-  shots: DirectorShot[],
-  directionSummary: string,
-  feedback?: string
-): Promise<VisualAssetShot[]> {
-  const shotsBrief = shots
-    .map(
-      (s) =>
-        `شات ${s.shotNumber}: زاویه=${s.cameraAngle} | حرکت=${s.cameraMovement} | صحنه=${s.sceneDescriptionFa} | نور=${s.lightingAndMood} | دستور=${s.visualPromptFa}`
-    )
-    .join("\n");
-
-  const prompt = `شما طراح استوری‌بورد سینمایی و کارگردان هنری هستید.
-برای همه ${shots.length} شات زیر، استوری‌بورد وکتوری (SVG) لایه‌لایه، زیبا و متمایز در کادر عمودی 360x640 (نسبت ۹:۱۶) بسازید.
-
-سبک کلی پروژه: ${directionSummary}
-${feedback ? `درخواست اصلاحی کاربر: ${feedback}` : ""}
-
-فهرست شات‌ها:
-${shotsBrief}
-
-الزامات فنی خروجی:
-- در svgElements هر شات فقط عناصر داخلی SVG (مانند <rect>, <circle>, <ellipse>, <path>, <polygon>, <g>, <line>) در مختصات 360x640 بنویسید. از تگ <svg> بیرونی یا <script> یا متن استفاده نکنید.
-- برای هر شات ترکیب‌بندی منحصربه‌فرد (پس‌زمینه، عمق میانی، سوژه اصلی، نورپردازی حجمی و فلش حرکت دوربین) طراحی کنید.`;
-
-  try {
-    const routedVisuals = await executeAgentJsonWithRouter<
-      Array<{
-        shotNumber: number;
-        bgTop: string;
-        bgMid: string;
-        bgBottom: string;
-        svgElements: string;
-        motionCue: string;
-        colorPaletteNote: string;
-      }>
-    >({
-      agentId: "visuals",
-      prompt: `${prompt}\n\nخروجی باید دقیقاً یک آرایه JSON شامل آبجکت‌هایی با فیلدهای زیر باشد: shotNumber, bgTop, bgMid, bgBottom, svgElements, motionCue, colorPaletteNote.`,
-      expectArray: true,
-      googleResponseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            shotNumber: { type: Type.INTEGER },
-            bgTop: { type: Type.STRING },
-            bgMid: { type: Type.STRING },
-            bgBottom: { type: Type.STRING },
-            svgElements: { type: Type.STRING },
-            motionCue: { type: Type.STRING },
-            colorPaletteNote: { type: Type.STRING },
-          },
-          required: [
-            "shotNumber",
-            "bgTop",
-            "bgMid",
-            "bgBottom",
-            "svgElements",
-            "motionCue",
-            "colorPaletteNote",
-          ],
-        },
-      },
-    });
-
-    const parsedList = Array.isArray(routedVisuals.data) ? routedVisuals.data : [];
-
-    const hexRegex = /^#[0-9A-Fa-f]{6}$/;
-
-    return shots.map((shot) => {
-      const match = parsedList.find((item) => item.shotNumber === shot.shotNumber);
-      if (!match) return buildFallbackStoryboardShot(projectId, shot);
-
-      const palette: [string, string, string] = [
-        hexRegex.test(match.bgTop) ? match.bgTop : "#0F172A",
-        hexRegex.test(match.bgMid) ? match.bgMid : "#1E293B",
-        hexRegex.test(match.bgBottom) ? match.bgBottom : "#090B10",
-      ];
-      const fullSvg = wrapStoryboardSvg(match.svgElements || "", shot, palette);
-      const filename = `${projectId}_shot_${shot.shotNumber}_${Date.now()}.svg`;
-      const imageUrl = saveVisualSvgFile(filename, fullSvg);
-
-      return {
-        shotNumber: shot.shotNumber,
-        imageUrl,
-        svgMarkup: fullSvg,
-        motionCue: match.motionCue,
-        colorPaletteNote: match.colorPaletteNote,
-        status: "ready",
-        error: null,
-      };
-    });
-  } catch (err) {
-    return shots.map((shot) => buildFallbackStoryboardShot(projectId, shot, err));
-  }
-}
-
-/**
- * Agent 4 (Single Shot): Regenerate a specific storyboard frame on demand
- */
-export async function runVisualProducerForShot(
-  projectId: string,
-  shot: DirectorShot,
-  directionSummary: string,
-  feedback?: string
-): Promise<VisualAssetShot> {
-  const [result] = await runVisualProducerBatch(projectId, [shot], directionSummary, feedback);
-  return result;
-}
-
-/**
- * Studio Image Create & Edit using gemini-nano-banana-2.1
- */
-export async function runStudioImageAgent(params: {
-  prompt: string;
-  aspectRatio?: "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
-  imageSize?: "1K" | "2K" | "4K";
-  imageBase64?: string;
-  mimeType?: string;
-  useSearchGrounding?: boolean;
-}): Promise<{ imageUrl: string; mimeType: string; caption: string }> {
-  const ai = getClient();
-  const parts: Array<
-    | { text: string }
-    | { inlineData: { data: string; mimeType: string } }
-  > = [];
-
-  if (params.imageBase64) {
-    parts.push({
-      inlineData: {
-        data: params.imageBase64,
-        mimeType: params.mimeType || "image/png",
-      },
-    });
-  }
-  parts.push({ text: params.prompt });
-
-  const config: Record<string, unknown> = {
-    imageConfig: {
-      aspectRatio: params.aspectRatio || "1:1",
-      imageSize: params.imageSize || "1K",
-    },
-  };
-
-  if (params.useSearchGrounding && !params.imageBase64) {
-    config.tools = [
-      {
-        googleSearch: {
-          searchTypes: {
-            webSearch: {},
-            imageSearch: {},
-          },
-        },
-      },
-    ];
-  }
-
-  const response = await ai.models.generateContent({
-    model: "gemini-nano-banana-2.1",
-    contents: { parts },
-    config: config as never,
-  });
-
-  let savedUrl = "";
-  let outMime = "image/png";
-  const textNotes: string[] = [];
-
-  for (const part of response.candidates?.[0]?.content?.parts ?? []) {
-    if (part.inlineData?.data && !savedUrl) {
-      outMime = part.inlineData.mimeType ?? "image/png";
-      const ext = outMime.includes("jpeg") || outMime.includes("jpg") ? "jpg" : outMime.includes("webp") ? "webp" : "png";
-      const filename = `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
-      const buffer = Buffer.from(part.inlineData.data, "base64");
-      savedUrl = saveImageFile(filename, buffer);
-    } else if (part.text) {
-      textNotes.push(part.text);
-    }
-  }
-
-  if (!savedUrl) {
-    throw new Error("مدل تصویرسازی خروجی تصویری برنگرداند. لطفاً دستور تصویر را واضح‌تر بنویسید.");
-  }
-
-  return {
-    imageUrl: savedUrl,
-    mimeType: outMime,
-    caption: textNotes.join(" ").trim(),
-  };
-}
-
-/**
- * Studio Video Generation — Local Keyframe Animation ONLY (ComfyUI local server + Parallax fallback).
- * Strictly enforces Image-to-Video only; Text-to-Video without a keyframe is forbidden.
- */
-export async function runStudioVideoAgent(params: {
-  prompt: string;
-  aspectRatio?: "16:9" | "9:16";
-  duration?: "5s" | "8s" | "10s" | "15s";
-  resolution?: "720p" | "1080p";
-  imageBase64?: string;
-  mimeType?: string;
-}): Promise<{
-  videoUrl: string;
-  mimeType: string;
-  providerUsed: "comfyui" | "parallax";
-  renderDurationMs: number;
-  vramUsedMb: number;
-  attempts: number;
-  fallbackTriggered: boolean;
-}> {
-  if (!params.imageBase64 || !params.imageBase64.trim()) {
-    throw new Error(
-      "قانون کیفیت شماره ۴: تولید ویدیو از متن (Text-to-Video) ممنوع است. فقط متحرک‌سازی تصویر کلیدی (Image-to-Video) با ComfyUI محلی یا Parallax مجاز است."
-    );
-  }
-
-  const fsMod = await import("node:fs");
-  const pathMod = await import("node:path");
-  const { getVideosDir, getImagesDir } = await import("./store.js");
-  const { ComfyUIProvider } = await import("./video/providers/comfyui.js");
-
-  const ext =
-    params.mimeType?.includes("svg")
-      ? "svg"
-      : params.mimeType?.includes("jpeg") || params.mimeType?.includes("jpg")
-        ? "jpg"
-        : "png";
-  const keyframeFilename = `kf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
-  const keyframePath = pathMod.join(getImagesDir(), keyframeFilename);
-  fsMod.writeFileSync(keyframePath, Buffer.from(params.imageBase64, "base64"));
-
-  const durationSecMap: Record<string, number> = {
-    "5s": 5,
-    "8s": 8,
-    "10s": 10,
-    "15s": 15,
-  };
-  const durationSec = durationSecMap[params.duration || "5s"] || 4;
-  const aspect = params.aspectRatio === "16:9" ? "16:9" : "9:16";
-  const qualityMode = params.resolution === "1080p" ? "final_1080p" : "preview_480p";
-  const [width, height] =
-    qualityMode === "final_1080p"
-      ? aspect === "16:9"
-        ? [1920, 1080]
-        : [1080, 1920]
-      : aspect === "16:9"
-        ? [854, 480]
-        : [480, 854];
-
-  const outFilename = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
-  const outputPath = pathMod.join(getVideosDir(), outFilename);
-
-  const provider = new ComfyUIProvider();
-  const result = await provider.generateClip({
-    shotId: `studio_${Date.now()}`,
-    prompt: params.prompt,
-    keyframePath,
-    aspectRatio: aspect,
-    durationSec,
-    resolution: qualityMode === "final_1080p" ? "1080p" : "480p",
-    visualCriticApprovedPreview: qualityMode === "final_1080p",
-    width,
-    height,
-    fps: 30,
-    outputPath,
-    cameraMotion: "push-in",
-    qualityMode,
-  });
-
-  return {
-    videoUrl: `/api/media/videos/${outFilename}`,
-    mimeType: "video/mp4",
-    providerUsed: result.providerUsed,
-    renderDurationMs: result.totalDurationMs,
-    vramUsedMb: result.vramUsedMb,
-    attempts: result.attempts,
-    fallbackTriggered: result.fallbackUsed,
-  };
-}
-
-/**
- * Audio Transcription using gemini-3.5-transcribe
+ * Audio Transcription using free-tier gemini-3.5-transcribe (for user's voice clone reference sample)
  */
 export async function runAudioTranscriptionAgent(params: {
   audioBase64: string;
@@ -1255,7 +1414,7 @@ export async function runAudioTranscriptionAgent(params: {
           {
             text:
               params.instruction?.trim() ||
-              "این فایل صوتی را با دقت بالا به متن روان و مرتب (به زبان فارسی یا زبان گفتار داخل فایل) پیاده‌سازی و رونویسی کنید. فقط متن رونویسی‌شده را برگردانید.",
+              "این فایل صوتی را با دقت بالا به متن روان فارسی رونویسی کن. فقط متن گفتار را برگردان.",
           },
         ],
       },
@@ -1264,66 +1423,38 @@ export async function runAudioTranscriptionAgent(params: {
 
   const transcript = (response.text ?? "").trim();
   if (!transcript) {
-    throw new Error("متنی از فایل صوتی استخراج نشد. لطفاً صدای واضح‌تری ضبط یا بارگذاری کنید.");
+    throw new Error("متنی از نمونه صوتی استخراج نشد.");
   }
 
   return { transcript };
 }
 
-/**
- * Standalone Grounded Google Search Research Assistant
- */
 export async function runQuickSearchResearch(query: string): Promise<{
   summary: string;
   sources: GroundedSource[];
 }> {
+  const ai = getClient();
+  const res = await generateWithModelFallback(ai, {
+    contents: `درباره موضوع زیر با جستجوی به‌روز وب تحقیق کن و خلاصه دقیق و نکات کلیدی را به فارسی بنویس:\n${query}`,
+    config: {
+      tools: [{ googleSearch: {} }],
+    },
+  });
+
   const sources: GroundedSource[] = [];
   const seen = new Set<string>();
-  let browserText = "";
-
-  try {
-    const mission = await executeAgentWebResearchMission(query, "ایجنت دستیار پژوهش سریع وب");
-    browserText = mission.synthesizedContextFa;
-    for (const s of mission.sources) {
-      if (!seen.has(s.uri)) {
-        seen.add(s.uri);
-        sources.push(s);
-      }
+  for (const chunk of res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
+    if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
+      seen.add(chunk.web.uri);
+      sources.push({
+        title: chunk.web.title || chunk.web.uri,
+        uri: chunk.web.uri,
+      });
     }
-  } catch {
-    // Non-fatal
   }
 
-  try {
-    const ai = getClient();
-    const res = await generateWithModelFallback(ai, {
-      contents: `درباره موضوع زیر با جستجوی به‌روز وب تحقیق کن و خلاصه دقیق، آمار و نکات کلیدی را به فارسی روان بنویس:\n${query}\n${
-        browserText ? `\nاطلاعات استخراج‌شده توسط مرورگر ایجنت:\n${browserText}` : ""
-      }`,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    const chunks = res.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-    for (const chunk of chunks) {
-      if (chunk.web?.uri && !seen.has(chunk.web.uri)) {
-        seen.add(chunk.web.uri);
-        sources.push({
-          title: chunk.web.title || chunk.web.uri,
-          uri: chunk.web.uri,
-        });
-      }
-    }
-
-    return {
-      summary: (res.text ?? browserText).trim(),
-      sources: sources.slice(0, 8),
-    };
-  } catch {
-    return {
-      summary: browserText.trim() || `پژوهش وب برای «${query}» انجام شد.`,
-      sources: sources.slice(0, 8),
-    };
-  }
+  return {
+    summary: (res.text ?? "").trim(),
+    sources: sources.slice(0, 8),
+  };
 }

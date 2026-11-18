@@ -1,4 +1,7 @@
+import type { VideoPipelineRun } from "./videoPipeline.js";
+
 export type PlatformOption = "instagram" | "youtube" | "tiktok" | "reels" | "shorts";
+
 export type ContentFormatOption =
   | "reels"
   | "post"
@@ -10,15 +13,107 @@ export type ContentFormatOption =
 
 export type ToneOption = "educational" | "cinematic_story" | "news_analysis" | "fast_motivational";
 export type PageMaturityOption = "new_page" | "growing_page";
+
+/**
+ * 6-Step Studio Pipeline orchestrated by 2 Super-Agents:
+ * Agent 1 (scriptwriter_agent): research_script -> narration -> director (3-8s shots + 2 storyboard frames/shot)
+ * Agent 2 (director_agent): shot_videos (per-shot approval) -> voiceover (voice clone + diacritics) -> davinci (DaVinci Resolve automation + final MP4)
+ */
 export type PipelineStage =
   | "input"
   | "research_script"
-  | "storyboard"
-  | "video_shots"
+  | "narration"
+  | "director"
+  | "shot_videos"
   | "voiceover"
-  | "assembly"
+  | "davinci"
+  | "visuals"
   | "completed";
+
 export type CheckpointStatus = "idle" | "running" | "waiting_approval" | "approved" | "error";
+
+export type LocalVideoEngineId =
+  | "hyperframes_html"
+  | "comfyui_light"
+  | "remotion_kinetic"
+  | "blender_headless"
+  | "ffmpeg_cinema";
+
+export interface LocalEngineStatus {
+  id: LocalVideoEngineId;
+  labelFa: string;
+  descriptionFa: string;
+  available: boolean;
+  hardwareNoteFa: string;
+  isDefault: boolean;
+  requiresGpu: boolean;
+}
+
+export interface QualityCheckItem {
+  nameFa: string;
+  passed: boolean;
+  detailFa: string;
+  metric?: string;
+}
+
+export interface StageQualityAudit {
+  stage: string;
+  inspectedAt: string;
+  inspectorModel: string;
+  passed: boolean;
+  score: number;
+  attemptsRun: number;
+  selfHealed: boolean;
+  checks: QualityCheckItem[];
+  visionCritiqueFa?: string;
+  fixesAppliedFa: string[];
+}
+
+export interface DirectingCrewNotes {
+  showrunnerNoteFa: string;
+  dopCinematographyNoteFa: string;
+  artDirectionNoteFa: string;
+  editorRhythmNoteFa: string;
+  soundDesignNoteFa: string;
+}
+
+export type VoicePersona = "Kore" | "Puck" | "Charon" | "Fenrir" | "Zephyr";
+
+export interface PageVoiceReference {
+  speakerName: string;
+  voicePersona: VoicePersona;
+  prosodyStyle: string;
+  sampleAudioUrl: string | null;
+  sampleTranscript?: string;
+  cloneEnginePreference: "gemini_persona" | "local_xtts_v2" | "local_f5_tts";
+}
+
+export interface PageProfile {
+  id: string;
+  name: string;
+  handle: string;
+  platform: "instagram" | "youtube" | "tiktok";
+  defaultFormat: ContentFormatOption;
+  pageMaturity: PageMaturityOption;
+  niche: string;
+  contentStyle: string;
+  targetAudiencePersona: string;
+  audiencePainPoints: string[];
+  brandTone: ToneOption;
+  brandToneNoteFa: string;
+  visualAestheticFa: string;
+  tabooRedLines: string[];
+  algorithmGuardrails: string[];
+  competitorHandles: string[];
+  voiceProfile: PageVoiceReference;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroundedSource {
+  title: string;
+  uri: string;
+}
 
 export interface ViralTopicProposal {
   id: string;
@@ -29,6 +124,7 @@ export interface ViralTopicProposal {
   recommendedToneLabelFa: string;
   recommendedDurationSeconds: number;
   recommendedDurationLabelFa: string;
+  contentValueScoreNote?: string;
   strategistAngle: string;
   psychologyTrigger: string;
   creatorExecutionTip: string;
@@ -57,6 +153,7 @@ export interface TopicAnalysisResponse {
 export interface ProjectBrief {
   title: string;
   idea: string;
+  pageProfileId?: string | null;
   platform: PlatformOption;
   contentFormat?: ContentFormatOption;
   pageMaturity?: PageMaturityOption;
@@ -64,11 +161,8 @@ export interface ProjectBrief {
   toneLabelFa?: string;
   targetDurationSeconds: number;
   selectedTopicAngle?: ViralTopicProposal | null;
-}
-
-export interface GroundedSource {
-  title: string;
-  uri: string;
+  preferredVideoEngine?: LocalVideoEngineId;
+  autonomousMode?: boolean;
 }
 
 export interface ResearchAndScriptOutput {
@@ -81,48 +175,91 @@ export interface ResearchAndScriptOutput {
   hook: string;
   body: string;
   cta: string;
+  psychologicalTriggersUsed?: string[];
+  algorithmComplianceChecklist?: string[];
   keywords: string[];
+  qaAudit?: StageQualityAudit | null;
 }
 
-export type VoicePersona = "Kore" | "Puck" | "Charon" | "Fenrir" | "Zephyr";
+export interface PronunciationGuideEntry {
+  word: string;
+  vocalized: string;
+  emotionOrStressNote: string;
+}
+
+export interface NarrationScriptOutput {
+  plainNarrationText: string;
+  vocalizedNarrationText: string;
+  pronunciationGuide: PronunciationGuideEntry[];
+  rhythmAndPauseNotes: string;
+  emotionArcSummary: string;
+  estimatedSeconds: number;
+  wordCount: number;
+  qaAudit?: StageQualityAudit | null;
+}
 
 export interface VoiceoverOutput {
   narrationText: string;
+  vocalizedText?: string;
   voiceName: VoicePersona;
   voiceStyle: string;
+  referenceSampleUrl?: string | null;
+  cloneEngineNote?: string;
   estimatedSeconds: number;
   wordCount: number;
   pacingNotes: string;
   audioUrl: string | null;
   audioFilename: string | null;
   audioError?: string | null;
+  qaAudit?: StageQualityAudit | null;
 }
 
 export interface DirectorShot {
   shotNumber: number;
   timecode: string;
-  durationSeconds: number;
+  durationSeconds: number; // Strictly 3 to 8 seconds
   cameraAngle: string;
   cameraMovement: string;
   sceneDescriptionFa: string;
+  startFrameDescriptionFa?: string;
+  endFrameDescriptionFa?: string;
   spokenSegment: string;
   onScreenText: string;
+  sfxCueFa?: string;
+  transitionToNext?: "cut" | "cross_dissolve" | "whip_pan" | "zoom_in";
   lightingAndMood: string;
   visualPromptFa: string;
+  dramaticBeatFa?: string;
+  microScenarioFa?: string;
+  subjectAndActionFa?: string;
+  environmentAndPropsFa?: string;
+  lensAndFramingFa?: string;
+  lightingRigFa?: string;
+  continuityLockFa?: string;
+  photorealPromptStartEn?: string;
+  photorealPromptEndEn?: string;
+  negativePromptEn?: string;
+  recommendedEngine?: LocalVideoEngineId;
 }
 
 export interface DirectorOutput {
   visualDirectionSummary: string;
   totalEstimatedSeconds: number;
+  directingCrewNotes?: DirectingCrewNotes | null;
+  qaAudit?: StageQualityAudit | null;
   shots: DirectorShot[];
 }
 
 export interface VisualAssetShot {
   shotNumber: number;
-  imageUrl: string | null;
+  imageUrl: string | null; // Frame 1 (Opening / Start Frame)
+  secondaryImageUrl?: string | null; // Frame 2 (Action / Payoff Frame)
   svgMarkup?: string | null;
+  secondarySvgMarkup?: string | null;
   motionCue: string;
   colorPaletteNote: string;
+  generatorEngine?: LocalVideoEngineId;
+  qaAudit?: StageQualityAudit | null;
   status: "pending" | "generating" | "ready" | "error";
   error?: string | null;
 }
@@ -132,15 +269,52 @@ export interface VisualAssetsOutput {
   styleGuideSummary: string;
 }
 
+export type ShotVideoApprovalStatus = "not_rendered" | "rendering" | "waiting_approval" | "approved" | "needs_revision" | "error";
+
+export interface ShotVideoClipRecord {
+  shotNumber: number;
+  shotId: string;
+  durationSeconds: number;
+  videoUrl: string | null;
+  videoPath?: string | null;
+  approvalStatus: ShotVideoApprovalStatus;
+  revisionNote?: string;
+  sfxLabel?: string;
+  engineUsed?: LocalVideoEngineId;
+  qaAudit?: StageQualityAudit | null;
+  renderedAt?: string | null;
+  error?: string | null;
+}
+
+export interface DaVinciPackageSummary {
+  generatedAt: string;
+  projectName: string;
+  fps: number;
+  width: number;
+  height: number;
+  totalDurationSeconds: number;
+  targetLoudnessLufs: number;
+  colorGradePreset: string;
+  noiseReductionEnabled: boolean;
+  sfxCuesCount: number;
+  subtitleLinesCount: number;
+  fcpxmlPreview: string;
+  pythonScriptPreview: string;
+  srtPreview: string;
+  masterVideoUrl?: string | null;
+  engineUsed?: LocalVideoEngineId;
+  comfyuiWorkflowAvailable?: boolean;
+  qaAudit?: StageQualityAudit | null;
+}
+
 export interface GraphLogEntry {
   id: string;
   timestamp: string;
   node: string;
-  event: "node_started" | "node_completed" | "checkpoint_paused" | "checkpoint_resumed" | "error";
+  agent?: "scriptwriter_agent" | "director_agent" | "system";
+  event: "node_started" | "node_completed" | "checkpoint_paused" | "checkpoint_resumed" | "memory_learned" | "error";
   message: string;
 }
-
-import type { VideoPipelineRun } from "./videoPipeline.js";
 
 export interface ProjectRecord {
   id: string;
@@ -153,11 +327,97 @@ export interface ProjectRecord {
   waitingNode: string | null;
   errorMessage: string | null;
   researchScript: ResearchAndScriptOutput | null;
+  narration?: NarrationScriptOutput | null;
   voiceover: VoiceoverOutput | null;
   director: DirectorOutput | null;
   visuals: VisualAssetsOutput | null;
+  shotClips?: ShotVideoClipRecord[];
+  davinciPackage?: DaVinciPackageSummary | null;
   videoProduction?: VideoPipelineRun | null;
   logs: GraphLogEntry[];
+}
+
+export interface CompetitorBreakdown {
+  nameOrHandle: string;
+  platform: string;
+  coreStrength: string;
+  winningHookFormula: string;
+  weaknessOrGapForUs: string;
+}
+
+export interface ViralPatternItem {
+  rank: number;
+  patternTitle: string;
+  hookStructureFa: string;
+  retentionMechanismFa: string;
+  visualRhythmNote: string;
+  whyItWentViral: string;
+}
+
+export interface CompetitorViralReport {
+  id: string;
+  pageProfileId: string | null;
+  nicheQuery: string;
+  platform: PlatformOption;
+  analyzedAt: string;
+  executiveSummary: string;
+  safeResearchMethodNote: string;
+  competitors: CompetitorBreakdown[];
+  weeklyTopViralPatterns: ViralPatternItem[];
+  algorithmRulesAndRedLines: string[];
+  sources: GroundedSource[];
+}
+
+export type AgentSuperRole = "scriptwriter_agent" | "director_agent";
+export type MemoryScope = "global" | "page" | "project";
+export type MemoryCategory = "learned_rule" | "mistake_repaired" | "viral_pattern" | "voice_and_edit_rule";
+
+export interface AgentMemoryEntry {
+  id: string;
+  agentId: AgentSuperRole;
+  scope: MemoryScope;
+  pageProfileId?: string | null;
+  projectId?: string | null;
+  category: MemoryCategory;
+  ruleText: string;
+  sourceEvent: string;
+  strength: number; // 1 to 10
+  appliedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type VaultFolderId = "01_Pages" | "02_Viral_Lab" | "03_Agent_Memory" | "04_Projects";
+
+export interface VaultNote {
+  id: string;
+  slug: string;
+  folder: VaultFolderId;
+  title: string;
+  tags: string[];
+  wikilinks: string[]; // target note titles/slugs parsed from [[...]]
+  backlinks: string[];
+  contentMd: string;
+  updatedAt: string;
+}
+
+export interface VaultGraphNode {
+  id: string;
+  label: string;
+  folder: VaultFolderId;
+  degree: number;
+}
+
+export interface VaultGraphEdge {
+  source: string;
+  target: string;
+}
+
+export interface VaultSnapshot {
+  notes: VaultNote[];
+  nodes: VaultGraphNode[];
+  edges: VaultGraphEdge[];
+  lastSyncedAt: string;
 }
 
 export interface WindowsBundleFilePreview {
@@ -181,12 +441,6 @@ export interface StudioMediaAsset {
   notes?: string;
   createdAt: string;
 }
-
-export type ImageAspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
-export type ImageResolution = "1K" | "2K" | "4K";
-export type VideoAspectRatio = "16:9" | "9:16";
-export type VideoDurationOption = "5s" | "8s" | "10s" | "15s";
-export type VideoResolutionOption = "720p" | "1080p";
 
 export type RouterProviderKind =
   | "google"
@@ -221,6 +475,7 @@ export interface RouterProviderAccount {
   name: string;
   baseUrl: string;
   useServerEnv?: boolean;
+  envVarName?: string;
   hasApiKey: boolean;
   maskedKey: string;
   enabled: boolean;
@@ -240,202 +495,3 @@ export interface RouterConfigPublic {
   agentRoutes: Record<StudioAgentId, AgentRouteTarget[]>;
   updatedAt: string;
 }
-
-export type AgentBrowserCommandType =
-  | "search"
-  | "goto"
-  | "click"
-  | "fill"
-  | "select"
-  | "register"
-  | "snapshot"
-  | "scroll"
-  | "extract"
-  | "comprehend"
-  | "mission"
-  | "solve_obstacles"
-  | "switch_profile"
-  | "refine_prompt"
-  | "studio_generate";
-
-export type WebStudioSiteId =
-  | "google_flow"
-  | "leonardo_ai"
-  | "kling_web"
-  | "runway_web"
-  | "general_web";
-
-export type WebStudioGenerationMode =
-  | "text_to_image"
-  | "image_to_video"
-  | "text_to_video";
-
-export type WebStudioModelOption =
-  | "veo_2"
-  | "omni_flash"
-  | "imagen_3"
-  | "leonardo_phoenix"
-  | "leonardo_kino_xl"
-  | "leonardo_motion"
-  | "kling_1_6"
-  | "runway_gen3_turbo";
-
-export interface BrowserProfileAccount {
-  id: string;
-  name: string;
-  email: string;
-  password: string;
-  avatarColor: string;
-  userDataDir: string;
-  status: "active" | "standby" | "quota_exhausted" | "cooldown";
-  dailyLimit: number;
-  usedToday: number;
-  connectedSites: WebStudioSiteId[];
-  lastUsedAt: string | null;
-  notesFa: string;
-}
-
-export interface WebStudioSiteConfig {
-  siteId: WebStudioSiteId;
-  siteLabelFa: string;
-  targetUrl: string;
-  mode: WebStudioGenerationMode;
-  modelId: WebStudioModelOption;
-  modelLabelFa: string;
-  aspectRatio: "9:16" | "16:9" | "1:1";
-  resolution: "720p" | "1080p";
-  durationSeconds: 5 | 8 | 10;
-  cfgScaleOrCreativity: number;
-  autoSolveCloudflareAndCaptcha: boolean;
-  autoRotateProfileOnQuota: boolean;
-}
-
-export interface ObstacleBypassRecord {
-  id: string;
-  timestamp: string;
-  kind:
-    | "cloudflare_turnstile"
-    | "recaptcha_im_not_robot"
-    | "cookie_consent"
-    | "google_auth_session"
-    | "quota_limit_rotate";
-  url: string;
-  resolved: boolean;
-  strategyUsedFa: string;
-  durationMs: number;
-}
-
-export interface WebStudioShotJob {
-  id: string;
-  createdAt: string;
-  projectId: string | null;
-  shotNumber: number | null;
-  siteId: WebStudioSiteId;
-  siteLabelFa: string;
-  mode: WebStudioGenerationMode;
-  modelId: WebStudioModelOption;
-  modelLabelFa: string;
-  aspectRatio: "9:16" | "16:9" | "1:1";
-  resolution: "720p" | "1080p";
-  rawPrompt: string;
-  finalizedPrompt: string;
-  promptRefinementNotesFa: string[];
-  profileUsedId: string;
-  profileUsedEmail: string;
-  profileSwitchedFromEmail: string | null;
-  obstaclesResolved: string[];
-  langGraphNodesExecuted: string[];
-  outputMediaUrl: string | null;
-  outputKind: "image" | "video";
-  status: "running" | "completed" | "error";
-  error?: string | null;
-}
-
-export interface AgentBrowserLinkItem {
-  index: number;
-  text: string;
-  href: string;
-  role?: string;
-}
-
-export interface AgentBrowserInteractiveRef {
-  ref: string;
-  role: string;
-  name: string;
-}
-
-export interface AgentBrowserSearchResult {
-  index: number;
-  title: string;
-  url: string;
-  snippet: string;
-  sourceEngine: string;
-}
-
-export interface AgentBrowserExtractedPage {
-  url: string;
-  title: string;
-  domain: string;
-  statusCode: number;
-  contentType: string;
-  summaryText: string;
-  headings: string[];
-  keyParagraphs: string[];
-  keyDataPoints: string[];
-  links: AgentBrowserLinkItem[];
-  interactiveRefs?: AgentBrowserInteractiveRef[];
-  snapshotText?: string;
-  wordCount: number;
-  scrollY: number;
-  maxScrollY: number;
-  extractedAt: string;
-}
-
-export interface AgentBrowserActionLog {
-  id: string;
-  timestamp: string;
-  agentName: string;
-  command: AgentBrowserCommandType;
-  target: string;
-  status: "running" | "success" | "error";
-  detailFa: string;
-  durationMs: number;
-}
-
-export interface AgentBrowserState {
-  engineName: string;
-  playwrightConnected: boolean;
-  status: "idle" | "browsing" | "extracting" | "generating_media" | "solving_obstacle" | "error";
-  activeAgent: string | null;
-  currentCommand: string | null;
-  currentUrl: string;
-  pageTitle: string;
-  viewportSvgUrl: string | null;
-  viewportScreenshotUrl: string | null;
-  scrollY: number;
-  maxScrollY: number;
-  searchQuery: string;
-  searchResults: AgentBrowserSearchResult[];
-  extractedPage: AgentBrowserExtractedPage | null;
-  comprehensionSummaryFa: string;
-  comprehensionFactsFa: string[];
-  profiles: BrowserProfileAccount[];
-  activeProfileId: string;
-  siteConfig: WebStudioSiteConfig;
-  lastRefinedPrompt: {
-    rawPrompt: string;
-    finalizedPrompt: string;
-    enhancementsFa: string[];
-    targetSiteId: WebStudioSiteId;
-    targetModelId: WebStudioModelOption;
-    mode: WebStudioGenerationMode;
-  } | null;
-  obstacleHistory: ObstacleBypassRecord[];
-  shotJobs: WebStudioShotJob[];
-  history: string[];
-  actionLog: AgentBrowserActionLog[];
-  updatedAt: string;
-}
-
-
-
