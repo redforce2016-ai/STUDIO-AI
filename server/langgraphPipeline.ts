@@ -1117,7 +1117,11 @@ export async function runAutonomousEndToEndPipeline(
       current.director ??
       (await runDirectorAgent(
         current.researchScript!,
-        current.narration.vocalizedNarrationText || current.narration.plainNarrationText,
+        current.narration?.vocalizedNarrationText ||
+          current.narration?.plainNarrationText ||
+          [current.researchScript?.hook, current.researchScript?.body, current.researchScript?.cta]
+            .filter(Boolean)
+            .join("\n"),
         current.brief,
         undefined,
         current.id

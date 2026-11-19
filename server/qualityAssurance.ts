@@ -403,74 +403,51 @@ export async function runMultimodalVisionFrameQA(params: {
 اگر ایرادی وجود دارد، در autoFixPromptFa راهکار دقیق اصلاحی را بنویس.`;
 
         let response;
+        const callVisionWithTimeout = async (modelId: string, timeoutMs: number) =>
+          Promise.race([
+            ai.models.generateContent({
+              model: modelId,
+              contents: {
+                parts: [
+                  { inlineData: { mimeType, data: imgBase64 } },
+                  { text: prompt },
+                ],
+              },
+              config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                    passed: { type: Type.BOOLEAN },
+                    overallScore: { type: Type.INTEGER },
+                    semanticAlignmentScore: { type: Type.INTEGER },
+                    visualRealismScore: { type: Type.INTEGER },
+                    safeZoneAndTypographyScore: { type: Type.INTEGER },
+                    critiqueSummaryFa: { type: Type.STRING },
+                    autoFixPromptFa: { type: Type.STRING },
+                  },
+                  required: [
+                    "passed",
+                    "overallScore",
+                    "semanticAlignmentScore",
+                    "visualRealismScore",
+                    "safeZoneAndTypographyScore",
+                    "critiqueSummaryFa",
+                  ],
+                },
+              },
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`vision_qa_timeout_${modelId}`)), timeoutMs)
+            ),
+          ]);
+
         try {
-          inspectorModel = "gemini-4-hydrogen";
-          response = await ai.models.generateContent({
-            model: "gemini-4-hydrogen",
-            contents: {
-              parts: [
-                { inlineData: { mimeType, data: imgBase64 } },
-                { text: prompt },
-              ],
-            },
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  passed: { type: Type.BOOLEAN },
-                  overallScore: { type: Type.INTEGER },
-                  semanticAlignmentScore: { type: Type.INTEGER },
-                  visualRealismScore: { type: Type.INTEGER },
-                  safeZoneAndTypographyScore: { type: Type.INTEGER },
-                  critiqueSummaryFa: { type: Type.STRING },
-                  autoFixPromptFa: { type: Type.STRING },
-                },
-                required: [
-                  "passed",
-                  "overallScore",
-                  "semanticAlignmentScore",
-                  "visualRealismScore",
-                  "safeZoneAndTypographyScore",
-                  "critiqueSummaryFa",
-                ],
-              },
-            },
-          });
-        } catch {
           inspectorModel = "gemini-3.1-flash-lite";
-          response = await ai.models.generateContent({
-            model: "gemini-3.1-flash-lite",
-            contents: {
-              parts: [
-                { inlineData: { mimeType, data: imgBase64 } },
-                { text: prompt },
-              ],
-            },
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  passed: { type: Type.BOOLEAN },
-                  overallScore: { type: Type.INTEGER },
-                  semanticAlignmentScore: { type: Type.INTEGER },
-                  visualRealismScore: { type: Type.INTEGER },
-                  safeZoneAndTypographyScore: { type: Type.INTEGER },
-                  critiqueSummaryFa: { type: Type.STRING },
-                  autoFixPromptFa: { type: Type.STRING },
-                },
-                required: [
-                  "passed",
-                  "overallScore",
-                  "semanticAlignmentScore",
-                  "visualRealismScore",
-                  "safeZoneAndTypographyScore",
-                  "critiqueSummaryFa",
-                ],
-              },
-            },
-          });
+          response = await callVisionWithTimeout("gemini-3.1-flash-lite", 6500);
+        } catch {
+          inspectorModel = "gemini-4-hydrogen";
+          response = await callVisionWithTimeout("gemini-4-hydrogen", 5500);
         }
 
         const parsed = JSON.parse(response.text || "{}") as {
@@ -591,7 +568,7 @@ export async function auditShotVideoMp4(params: {
   let inspectorModel = "ffprobe-deterministic";
   let visionCritiqueFa = "";
   let autoFixPromptFa: string | undefined;
-  const midPngPath = `${params.videoPath}.qa_mid.png`;
+  const midPngPath = `${params.videoPath}.qa_mid.jpg`;
   try {
     const midTs = Math.max(0.2, (det.duration_sec || params.shot.durationSeconds) / 2);
     await execFileAsync("ffmpeg", [
@@ -600,6 +577,10 @@ export async function auditShotVideoMp4(params: {
       midTs.toFixed(2),
       "-i",
       params.videoPath,
+      "-vf",
+      "scale=360:-1",
+      "-q:v",
+      "5",
       "-frames:v",
       "1",
       midPngPath,
@@ -766,10 +747,23 @@ export async function auditFinalReelsMasterMp4(params: {
   let inspectorModel = "ffprobe-master-auditor";
   let visionCritiqueFa = "";
   const firstShot = params.shots[0];
-  const probeFrame = `${params.masterPath}.master_qa.png`;
+  const probeFrame = `${params.masterPath}.master_qa.jpg`;
   if (firstShot && fs.existsSync(params.masterPath)) {
     try {
-      await execFileAsync("ffmpeg", ["-y", "-ss", "0.8", "-i", params.masterPath, "-frames:v", "1", probeFrame]);
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-ss",
+        "0.8",
+        "-i",
+        params.masterPath,
+        "-vf",
+        "scale=360:-1",
+        "-q:v",
+        "5",
+        "-frames:v",
+        "1",
+        probeFrame,
+      ]);
       if (fs.existsSync(probeFrame)) {
         const vRes = await runMultimodalVisionFrameQA({
           imagePath: probeFrame,

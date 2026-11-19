@@ -270,9 +270,9 @@ export function GuidedStudioChat({
   };
 
   return (
-    <section className="flex h-full flex-col overflow-hidden rounded-2xl border border-[#262B38] bg-[#14171F]">
+    <section className="flex h-[560px] flex-col overflow-hidden rounded-2xl border border-[#262B38] bg-[#14171F] lg:h-[calc(100vh-7.25rem)]">
       {/* Calm Header with Active Super-Agent Indicator */}
-      <div className="flex items-center justify-between gap-3 border-b border-[#262B38] px-5 py-4">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#262B38] px-5 py-4">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-amber-400">
             <span>۲ ابر-ایجنت خودتکامل‌یابنده</span>
@@ -291,7 +291,7 @@ export function GuidedStudioChat({
       </div>
 
       {/* Active Page Profile Selector Bar */}
-      <div className="border-b border-[#262B38] bg-[#0B0D11]/60 px-4 py-3">
+      <div className="shrink-0 border-b border-[#262B38] bg-[#0B0D11]/60 px-4 py-3">
         <div className="flex items-center justify-between gap-2">
           <label
             htmlFor="studio-page-select"
@@ -339,11 +339,10 @@ export function GuidedStudioChat({
         )}
       </div>
 
-      {/* Chat Messages Area */}
+      {/* Chat Messages Area (Fixed-height internal scroll) */}
       <div
         ref={chatContainerRef}
-        className="flex-1 space-y-4 overflow-y-auto p-5"
-        style={{ minHeight: "300px", maxHeight: "480px" }}
+        className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5"
       >
         {messages.length === 0 ? (
           <div className="space-y-4 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 p-4 text-xs leading-7 text-slate-300">
@@ -492,7 +491,7 @@ export function GuidedStudioChat({
       </div>
 
       {/* Bottom Guided Controls & Input Box */}
-      <form onSubmit={handleSubmit} className="space-y-3 border-t border-[#262B38] bg-[#0B0D11]/55 p-4">
+      <form onSubmit={handleSubmit} className="shrink-0 space-y-3 border-t border-[#262B38] bg-[#0B0D11]/55 p-4">
         {!hasActiveProject && (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-1.5">

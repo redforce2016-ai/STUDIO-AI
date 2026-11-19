@@ -891,10 +891,12 @@ export default function App() {
       {/* Main Content */}
       <main className="mx-auto w-full max-w-[1440px] flex-1 p-5 lg:p-7">
         {errorBanner && (
-          <div className="mb-5 flex items-center justify-between gap-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-red-400" />
-              <span>{errorBanner}</span>
+          <div className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-200">
+            <div className="flex min-w-0 flex-1 items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+              <span className="max-h-28 overflow-y-auto break-words leading-6">
+                {errorBanner}
+              </span>
             </div>
             <button
               type="button"

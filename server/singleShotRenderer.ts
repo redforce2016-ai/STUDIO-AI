@@ -220,24 +220,27 @@ export async function assembleApprovedProjectMasterMp4(
     ? path.join(getAudioDir(), path.basename(project.voiceover.audioFilename))
     : null;
 
-  const assembled = await assembleFinalVideo({
-    shots: ensuredClips,
-    workDir,
-    finalOutPath,
-    srtOutPath,
-    width,
-    height,
-    fps: 30,
-    narrationWavPath,
-    includeBackgroundMusic: true,
-    burnSubtitles: false, // Each shot already carries crisp HyperFrames RTL Persian Safe-Zone overlay PNG
-    targetLufs: -14,
-  });
-
+  let assembled: Awaited<ReturnType<typeof assembleFinalVideo>>;
   try {
-    fs.rmSync(workDir, { recursive: true, force: true });
-  } catch {
-    // ignore cleanup failure
+    assembled = await assembleFinalVideo({
+      shots: ensuredClips,
+      workDir,
+      finalOutPath,
+      srtOutPath,
+      width,
+      height,
+      fps: 30,
+      narrationWavPath,
+      includeBackgroundMusic: true,
+      burnSubtitles: false, // Each shot already carries crisp HyperFrames RTL Persian Safe-Zone overlay PNG
+      targetLufs: -14,
+    });
+  } finally {
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failure
+    }
   }
 
   const expectedTotalDur = directorShots.reduce((s, sh) => s + (sh.durationSeconds || 5), 0);

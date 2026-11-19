@@ -466,19 +466,21 @@ export async function assembleFinalVideo(params: {
         "sine=frequency=110:sample_rate=48000"
       );
       filterChains.push(
-        `[2:a]volume=0.05,lowpass=f=320[bgm]`,
-        `[1:a]aresample=48000,pan=stereo|c0=c0|c1=c0,apad=whole_dur=${totalDur.toFixed(2)}[vo]`,
+        `[2:a]volume=0.05,lowpass=f=320,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[bgm]`,
+        `[1:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=${totalDur.toFixed(2)}[vo]`,
         `[vo]asplit=2[vo_sc][vo_mix]`,
         `[bgm][vo_sc]sidechaincompress=threshold=0.02:ratio=6:attack=25:release=350[ducked_bgm]`,
         `[vo_mix][ducked_bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
       );
     } else {
       filterChains.push(
-        `[1:a]aresample=48000,pan=stereo|c0=c0|c1=c0,apad=whole_dur=${totalDur.toFixed(2)},loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
+        `[1:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=${totalDur.toFixed(2)},loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
       );
     }
   } else {
-    filterChains.push(`[0:a]loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`);
+    filterChains.push(
+      `[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
+    );
   }
 
   let videoMap = "0:v";
@@ -516,7 +518,13 @@ export async function assembleFinalVideo(params: {
     params.finalOutPath
   );
 
-  await execFileAsync("ffmpeg", finalArgs);
+  try {
+    await execFileAsync("ffmpeg", finalArgs);
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const tail = rawMsg.split("\n").filter((l) => l.trim() && !l.trim().startsWith("configuration:") && !l.trim().startsWith("lib")).slice(-3).join(" | ");
+    throw new Error(`خطا در مونتاژ نهایی FFmpeg: ${tail.slice(0, 260)}`);
+  }
   const finalProbe = await probeMedia(params.finalOutPath);
 
   return {
