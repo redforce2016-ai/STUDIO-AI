@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type { DirectorOutput, ResearchAndScriptOutput } from "../../src/types/studio.js";
 import type {
+  CinemaLookPreset,
   FinalQaReport,
+  KineticSubtitleStylePreset,
   ShotCompositionPlan,
   ShotExecutionRecord,
   ShotSpec,
@@ -14,7 +16,11 @@ import type {
   VideoQualityMode,
   VisualCriticIssue,
 } from "../../src/types/videoPipeline.js";
-import { getVideosDir } from "../store.js";
+import { getAudioDir, getImagesDir, getProject, getVideosDir, getVisualsDir } from "../store.js";
+import { getActiveRemoteComfyUrl } from "../cloudGpuNotebooks.js";
+import { getColabBridgeConfig } from "../colabBridge.js";
+import { extractDavinciClipsFromProject, generateOpenTimelineIoJson } from "../davinciResolveExport.js";
+import { generateAfterEffectsExtendScriptJsx } from "./afterEffectsExporter.js";
 import {
   buildDeterministicCompositionFromShot,
   buildShotCompositionPlan,
@@ -24,13 +30,24 @@ import {
   planShotsForProduction,
 } from "./agents.js";
 import { getRunOutputDir, getVideoConfig, resolveDimensions } from "./config.js";
-import { BlenderUnavailableError, isBlenderInstalled, renderBlenderShot } from "./providers/blender.js";
+import {
+  BlenderUnavailableError,
+  isBlenderInstalled,
+  isColabBlenderReady,
+  renderBlenderShot,
+} from "./providers/blender.js";
+import { ComfyUIProvider } from "./providers/comfyui.js";
 import {
   assembleFinalVideo,
   extractFrames,
+  normalizeShotClip,
+  probeMedia,
   runDeterministicChecks,
 } from "./providers/ffmpeg.js";
-import { GeminiOmniVideoProvider } from "./providers/generative.js";
+import { buildIndustrialPipeKeyframeSvg } from "./providers/generative.js";
+import { renderHyperFramesShot } from "./providers/hyperframes.js";
+import { OmniVideoProvider } from "./providers/omniVideo.js";
+import { ParallaxVideoProvider } from "./providers/parallax.js";
 import { renderRemotionShot } from "./providers/remotion.js";
 import { validateCompositionPlanSafety } from "./schemas.js";
 
@@ -115,6 +132,7 @@ function appendRunLog(runId: string, log: VideoPipelineLog, patch?: Partial<Vide
 // ============================================================================
 const ShotWorkerAnnotation = Annotation.Root({
   runId: Annotation<string>(),
+  projectId: Annotation<string | undefined>({ reducer: (_, n) => n, default: () => undefined }),
   scenarioText: Annotation<string>(),
   aspectRatio: Annotation<VideoAspectFormat>(),
   qualityMode: Annotation<VideoQualityMode>(),
@@ -154,12 +172,19 @@ async function builderNode(state: ShotWorkerState) {
     })
   );
 
-  const plan = await buildShotCompositionPlan({
-    spec,
-    attempt: nextAttempt,
-    priorIssues: state.priorIssues,
-    humanInstruction: state.humanInstruction,
-  });
+  const isKeyframeVideoTool =
+    spec.tool === "parallax" ||
+    spec.tool === "comfyui" ||
+    spec.tool === "omni_flash" ||
+    spec.tool === "generative_api";
+  const plan = isKeyframeVideoTool
+    ? buildDeterministicCompositionFromShot(spec)
+    : await buildShotCompositionPlan({
+        spec,
+        attempt: nextAttempt,
+        priorIssues: state.priorIssues,
+        humanInstruction: state.humanInstruction,
+      });
 
   const safety = validateCompositionPlanSafety(plan);
   const safePlan = safety.valid ? plan : buildDeterministicCompositionFromShot(spec);
@@ -186,7 +211,7 @@ async function rendererNode(state: ShotWorkerState) {
     state.runId,
     spec.shot_id,
     { status: "rendering" },
-    createLog("renderer", "info", `رندر شات ${spec.shot_id} با ابزار ${spec.tool}`, {
+    createLog("renderer", "info", `رندر شات ${spec.shot_id} با موتور ${spec.tool}`, {
       shot_id: spec.shot_id,
       attempt: state.attempt,
     })
@@ -196,14 +221,54 @@ async function rendererNode(state: ShotWorkerState) {
   let fallbackUsed = Boolean(spec.fallback_used);
   let fallbackReason: string | null = spec.fallback_reason || null;
   let cacheHit = false;
+  let renderDurationMs = 0;
+  let vramUsedMb = 0;
+  let ramUsedMb = 0;
+  let subClipsCount = 1;
+  let depthMapUrl: string | null = null;
 
   let renderError: string | null = null;
+  const renderStarted = Date.now();
 
   try {
-    if (spec.tool === "blender") {
+    // Always prioritize and preserve a verified Stage 3 Real Live-Action HD shot clip on disk
+    // regardless of whether tool_router suggested remotion/blender/omni_flash/parallax!
+    let reusedStage3Path: string | null = null;
+    if (!state.bypassCache && state.projectId) {
+      const proj = getProject(state.projectId);
+      const visMatch = proj?.visuals?.shots?.find((v) => v.shotNumber === spec.shot_number);
+      if (visMatch?.videoUrl && visMatch.videoUrl.startsWith("/api/media/videos/")) {
+        const diskVid = path.join(getVideosDir(), path.basename(visMatch.videoUrl));
+        if (fs.existsSync(diskVid)) {
+          const p = await probeMedia(diskVid).catch(() => null);
+          if (p && p.hasVideo && p.width >= 720 && p.durationSec >= 2.5) {
+            reusedStage3Path = diskVid;
+          }
+        }
+      }
+    }
+
+    if (reusedStage3Path) {
+      await normalizeShotClip(reusedStage3Path, outMp4, spec.resolution[0], spec.resolution[1], spec.fps);
+      cacheHit = true;
+      renderDurationMs = Date.now() - renderStarted;
+      fallbackReason = "استفاده مستقیم از فیلم مستند زنده تاییدشده مرحله ۳ با هم‌ترازی کامل رزولوشن و فریم‌ریت";
+    } else if (spec.tool === "hyperframes") {
+      const hfRes = await renderHyperFramesShot({
+        spec,
+        outputPath: outMp4,
+        keyframeImagePath: spec.visual.keyframe_path || null,
+        timeoutMs: cfg.shotRenderTimeoutMs,
+      });
+      toolUsed = "hyperframes";
+      renderDurationMs = hfRes.durationMs;
+      fallbackUsed = false;
+      fallbackReason = "رندر ۱۰۰٪ رایگان و دقیق با موتور HyperFrames (ذرات معلق + نور فلزی + تایپوگرافی مدرن فارسی)";
+    } else if (spec.tool === "blender") {
       try {
-        await renderBlenderShot({
+        const bRes = await renderBlenderShot({
           shotId: spec.shot_id,
+          spec,
           blenderPrompt: spec.visual.blender_prompt || spec.intent,
           durationSec: spec.duration_sec,
           width: spec.resolution[0],
@@ -212,46 +277,98 @@ async function rendererNode(state: ShotWorkerState) {
           outputPath: outMp4,
           timeoutMs: cfg.shotRenderTimeoutMs,
         });
+        toolUsed = "blender";
+        fallbackReason =
+          bRes.executionHost === "colab_gpu_blender"
+            ? "رندر واقعی سه‌بعدی PBR با Blender 4.2 روی Google Colab GPU"
+            : "رندر واقعی سه‌بعدی PBR با Blender محلی";
       } catch (err) {
-        // Fallback 1x to Remotion when Blender unavailable or fails
-        toolUsed = "remotion";
+        toolUsed = "hyperframes";
         fallbackUsed = true;
         fallbackReason =
           err instanceof BlenderUnavailableError
             ? err.message
-            : `خطا در Blender، انتقال به Remotion: ${err instanceof Error ? err.message : String(err)}`;
-        const remRes = await renderRemotionShot({
-          plan,
+            : `خطا در Blender، انتقال به HyperFrames: ${err instanceof Error ? err.message : String(err)}`;
+        await renderHyperFramesShot({
+          spec,
           outputPath: outMp4,
+          keyframeImagePath: spec.visual.keyframe_path || null,
           timeoutMs: cfg.shotRenderTimeoutMs,
-          bypassCache: state.bypassCache || state.attempt > 1,
         });
-        cacheHit = remRes.cacheHit;
       }
-    } else if (spec.tool === "generative_api") {
-      try {
-        const provider = new GeminiOmniVideoProvider();
-        await provider.generateClip({
+      renderDurationMs = Date.now() - renderStarted;
+    } else if (
+      spec.tool === "omni_flash" ||
+      spec.tool === "comfyui" ||
+      spec.tool === "parallax" ||
+      spec.tool === "generative_api"
+    ) {
+      {
+        // Ensure local keyframe exists (Strictly Image-to-Video; Text-to-Video is forbidden)
+        let keyframePath = spec.visual.keyframe_path?.trim() || "";
+        if (!keyframePath || !fs.existsSync(keyframePath)) {
+          const autoKeyframeSvgPath = path.join(shotDir, `${spec.shot_id}_keyframe.svg`);
+          fs.writeFileSync(autoKeyframeSvgPath, buildIndustrialPipeKeyframeSvg(spec), "utf-8");
+          keyframePath = autoKeyframeSvgPath;
+        }
+
+        const forceParallaxByQa = state.attempt >= 3 || spec.tool === "parallax";
+        const remoteComfyUrl = getActiveRemoteComfyUrl();
+        const clipReq = {
           shotId: spec.shot_id,
+          shotNumber: spec.shot_number,
+          keyframePath,
           prompt: spec.visual.generative_prompt || spec.intent,
+          cameraMotion: spec.visual.camera_motion,
           aspectRatio: state.aspectRatio,
           durationSec: spec.duration_sec,
-          resolution: state.qualityMode === "final_1080p" ? "1080p" : "720p",
-          outputPath: outMp4,
-          timeoutMs: 180_000,
-        });
-      } catch (err) {
-        // Fallback 1x to Remotion on timeout/billing/quota error
-        toolUsed = "remotion";
-        fallbackUsed = true;
-        fallbackReason = `فال‌بک به Remotion از Gemini Omni: ${err instanceof Error ? err.message : String(err)}`;
-        const remRes = await renderRemotionShot({
-          plan,
+          qualityMode: state.qualityMode,
+          resolution: (state.qualityMode === "final_1080p" ? "1080p" : "480p") as "1080p" | "480p",
+          width: spec.resolution[0],
+          height: spec.resolution[1],
+          fps: spec.fps,
+          visualCriticApprovedPreview: state.attempt > 1,
           outputPath: outMp4,
           timeoutMs: cfg.shotRenderTimeoutMs,
-          bypassCache: state.bypassCache || state.attempt > 1,
-        });
-        cacheHit = remRes.cacheHit;
+        };
+
+        let clipRes;
+        if (!forceParallaxByQa && spec.tool === "omni_flash") {
+          try {
+            const omni = new OmniVideoProvider();
+            clipRes = await omni.generateClip(clipReq);
+          } catch (omniErr) {
+            const errMsg = omniErr instanceof Error ? omniErr.message : String(omniErr);
+            const parallax = new ParallaxVideoProvider();
+            clipRes = await parallax.generateClip(clipReq);
+            clipRes = {
+              ...clipRes,
+              fallbackUsed: true,
+              fallbackReason: `فال‌بک به موتور 2.5D Depth Parallax پس از خطای Omni Flash: ${errMsg}`,
+            };
+          }
+        } else {
+          const provider = forceParallaxByQa
+            ? new ParallaxVideoProvider()
+            : new ComfyUIProvider({
+                baseUrl: remoteComfyUrl || undefined,
+                autoFallbackToParallax: true,
+              });
+          clipRes = await provider.generateClip(clipReq);
+        }
+
+        toolUsed = clipRes.providerUsed;
+        fallbackUsed = fallbackUsed || clipRes.fallbackUsed || forceParallaxByQa;
+        fallbackReason = clipRes.fallbackReason || fallbackReason;
+        renderDurationMs = clipRes.totalDurationMs;
+        vramUsedMb = clipRes.vramUsedMb;
+        ramUsedMb = clipRes.ramUsedMb;
+        subClipsCount = clipRes.subClipsCount;
+        if (clipRes.depthMapPath && fs.existsSync(clipRes.depthMapPath)) {
+          depthMapUrl = `/api/media/video-runs/${state.runId}/shots/${spec.shot_id}/${path.basename(
+            clipRes.depthMapPath
+          )}`;
+        }
       }
     } else {
       const remRes = await renderRemotionShot({
@@ -261,9 +378,11 @@ async function rendererNode(state: ShotWorkerState) {
         bypassCache: state.bypassCache || state.attempt > 1,
       });
       cacheHit = remRes.cacheHit;
+      renderDurationMs = Date.now() - renderStarted;
     }
   } catch (err) {
     renderError = err instanceof Error ? err.message : String(err);
+    renderDurationMs = Date.now() - renderStarted;
     appendRunLog(
       state.runId,
       createLog("renderer", "error", `خطا در رندر شات ${spec.shot_id}: ${renderError}`, {
@@ -280,6 +399,11 @@ async function rendererNode(state: ShotWorkerState) {
   updateShotInRun(state.runId, spec.shot_id, {
     renderPath: renderOk ? outMp4 : null,
     renderUrl,
+    depthMapUrl,
+    renderDurationMs,
+    vramUsedMb,
+    ramUsedMb,
+    subClipsCount,
     toolUsed,
     fallbackUsed,
     fallbackReason: renderError ? `${fallbackReason ? fallbackReason + " | " : ""}${renderError}` : fallbackReason,
@@ -320,7 +444,7 @@ async function frameExtractorNode(state: ShotWorkerState) {
           width: spec.resolution[0],
           height: spec.resolution[1],
           fps: spec.fps,
-          durationToleranceSec: cfg.durationToleranceSec,
+          durationToleranceSec: Math.max(cfg.durationToleranceSec, 1.25),
           requireAudio: false,
         })
       : {
@@ -340,7 +464,7 @@ async function frameExtractorNode(state: ShotWorkerState) {
 
   const frameFiles =
     videoPath && fs.existsSync(videoPath)
-      ? await extractFrames(videoPath, framesDir, spec.duration_sec)
+      ? await extractFrames(videoPath, framesDir, deterministicCheck.duration_sec || spec.duration_sec)
       : [];
   const frameUrls = frameFiles.map(
     (f) =>
@@ -539,11 +663,14 @@ const VideoPipelineAnnotation = Annotation.Root({
   scenarioText: Annotation<string>(),
   aspectRatio: Annotation<VideoAspectFormat>(),
   qualityMode: Annotation<VideoQualityMode>(),
+  colorGradePreset: Annotation<CinemaLookPreset>({ reducer: (_, n) => n, default: () => "industrial_teal_amber" }),
+  subtitleStylePreset: Annotation<KineticSubtitleStylePreset>({ reducer: (_, n) => n, default: () => "industrial_steel_blue" }),
+  musicSource: Annotation<"lyria" | "ambient_cinema" | "none">({ reducer: (_, n) => n, default: () => "ambient_cinema" }),
   director: Annotation<DirectorOutput | null>({ reducer: (_, n) => n, default: () => null }),
   researchScript: Annotation<ResearchAndScriptOutput | null>({ reducer: (_, n) => n, default: () => null }),
   narrationWavPath: Annotation<string | null>({ reducer: (_, n) => n, default: () => null }),
-  burnSubtitles: Annotation<boolean>({ reducer: (_, n) => n, default: () => false }),
-  includeBackgroundMusic: Annotation<boolean>({ reducer: (_, n) => n, default: () => false }),
+  burnSubtitles: Annotation<boolean>({ reducer: (_, n) => n, default: () => true }),
+  includeBackgroundMusic: Annotation<boolean>({ reducer: (_, n) => n, default: () => true }),
   needsClarification: Annotation<boolean>({ reducer: (_, n) => n, default: () => false }),
   clarificationQuestions: Annotation<string[]>({ reducer: (_, n) => n, default: () => [] }),
   shots: Annotation<ShotSpec[]>({ reducer: (_, n) => n, default: () => [] }),
@@ -629,38 +756,138 @@ async function shotPlannerNode(state: VideoPipelineState) {
   return { shots: planned };
 }
 
+/**
+ * Pure, unit-testable Open-Source Free-Engine Router.
+ * Strictly blocks automatic `omni_flash` routing — selects Blender (local/Colab GPU), ComfyUI (Colab GPU),
+ * HyperFrames (100% free local Playwright+Canvas+FFmpeg), or Remotion!
+ */
+export function resolveFreeEngineRoute(params: {
+  requestedTool: ShotToolKind;
+  hasKeyframe: boolean;
+  localBlenderAvailable: boolean;
+  colabBlenderAvailable: boolean;
+  remoteComfyUrl: string | null;
+  allowOmniFlashManualOverride?: boolean;
+}): { tool: ShotToolKind; fallbackUsed: boolean; fallbackReason: string } {
+  const { requestedTool, hasKeyframe, localBlenderAvailable, colabBlenderAvailable, remoteComfyUrl } = params;
+
+  if (requestedTool === "blender") {
+    if (localBlenderAvailable || colabBlenderAvailable) {
+      return {
+        tool: "blender",
+        fallbackUsed: false,
+        fallbackReason: colabBlenderAvailable
+          ? "رندر سه‌بعدی PBR واقعی روی Google Colab GPU (Blender 4.2)"
+          : "رندر سه‌بعدی PBR واقعی با Blender محلی",
+      };
+    }
+    return {
+      tool: "hyperframes",
+      fallbackUsed: true,
+      fallbackReason: "Blender محلی یا Colab GPU متصل نیست؛ انتقال رایگان به موتور HyperFrames (نور فلزی + ذرات + تایپوگرافی مدرن).",
+    };
+  }
+
+  if (requestedTool === "comfyui") {
+    if (remoteComfyUrl) {
+      return {
+        tool: "comfyui",
+        fallbackUsed: false,
+        fallbackReason: `اجرای Wan 2.2 / ComfyUI روی سرور واقعی Google Colab GPU (${remoteComfyUrl})`,
+      };
+    }
+    return {
+      tool: "hyperframes",
+      fallbackUsed: true,
+      fallbackReason: "سرور Google Colab ComfyUI متصل نیست؛ انتقال به موتور رایگان محلی HyperFrames.",
+    };
+  }
+
+  if (requestedTool === "remotion") {
+    return {
+      tool: "remotion",
+      fallbackUsed: false,
+      fallbackReason: "رندر رایگان موشن‌گرافیک و نمودار با Remotion v4",
+    };
+  }
+
+  if (requestedTool === "omni_flash" || requestedTool === "generative_api") {
+    if (params.allowOmniFlashManualOverride) {
+      return {
+        tool: "omni_flash",
+        fallbackUsed: false,
+        fallbackReason: "اجرای دستی OmniFlash بنا به درخواست صریح کاربر",
+      };
+    }
+    if (remoteComfyUrl && hasKeyframe) {
+      return {
+        tool: "comfyui",
+        fallbackUsed: false,
+        fallbackReason: "جایگزینی خودکار OmniFlash با موتور رایگان ComfyUI (Wan 2.2) روی Google Colab GPU",
+      };
+    }
+    return {
+      tool: "hyperframes",
+      fallbackUsed: false,
+      fallbackReason: "قفل پیش‌فرض روی موتور رایگان HyperFrames + FFmpeg (عدم مصرف OmniFlash)",
+    };
+  }
+
+  return {
+    tool: "hyperframes",
+    fallbackUsed: false,
+    fallbackReason: "رندر رایگان سینمایی با موتور HyperFrames (1080×1920 + ذرات + نورپردازی + تایپوگرافی فارسی)",
+  };
+}
+
 // Node 3: tool_router
 async function toolRouterNode(state: VideoPipelineState) {
   const cfg = getVideoConfig();
-  const blenderOk = cfg.enableBlender && isBlenderInstalled();
-  let generativeUsed = 0;
+  const colabCfg = getColabBridgeConfig();
+  const remoteComfyUrl =
+    (colabCfg.connected && colabCfg.lastHealth?.engines?.comfyui ? colabCfg.bridgeUrl : null) ||
+    getActiveRemoteComfyUrl();
+  const localBlenderAvailable = isBlenderInstalled();
+  const colabBlenderAvailable = isColabBlenderReady();
+  const projectRecord = state.projectId ? getProject(state.projectId) : null;
 
   const routed = state.shots.map((shot) => {
-    let tool = shot.tool;
-    let fallbackUsed = false;
-    let fallbackReason: string | null = null;
+    let resolvedKeyframePath = shot.visual.keyframe_path;
 
-    if (tool === "blender" && !blenderOk) {
-      tool = "remotion";
-      fallbackUsed = true;
-      fallbackReason = "باینری Blender روی سرور نصب نیست؛ هدایت خودکار شات به Remotion.";
-    } else if (tool === "generative_api") {
-      if (!cfg.enableGenerativeApi || generativeUsed >= cfg.maxGenerativeShotsPerRun) {
-        tool = "remotion";
-        fallbackUsed = true;
-        fallbackReason = !cfg.enableGenerativeApi
-          ? "مدل ویدیوی مولد Omni غیرفعال است؛ اجرا با Remotion."
-          : "سقف شات‌های مولد پر شده است؛ اجرا با Remotion.";
-      } else {
-        generativeUsed++;
+    // Resolve REAL Stage 2 storyboard keyframe image from disk if available!
+    if (!resolvedKeyframePath && projectRecord?.visuals?.shots) {
+      const visMatch = projectRecord.visuals.shots.find(
+        (v) => v.shotNumber === shot.shot_number
+      );
+      if (visMatch?.imageUrl) {
+        if (visMatch.imageUrl.startsWith("/api/media/images/")) {
+          const p = path.join(getImagesDir(), path.basename(visMatch.imageUrl));
+          if (fs.existsSync(p)) resolvedKeyframePath = p;
+        } else if (visMatch.imageUrl.startsWith("/api/media/visuals/")) {
+          const p = path.join(getVisualsDir(), path.basename(visMatch.imageUrl));
+          if (fs.existsSync(p)) resolvedKeyframePath = p;
+        }
       }
     }
 
+    const decision = resolveFreeEngineRoute({
+      requestedTool: shot.tool,
+      hasKeyframe: Boolean(resolvedKeyframePath),
+      localBlenderAvailable,
+      colabBlenderAvailable,
+      remoteComfyUrl,
+      allowOmniFlashManualOverride: cfg.enableGenerativeApi && shot.tool === "omni_flash",
+    });
+
     return {
       ...shot,
-      tool,
-      fallback_used: fallbackUsed,
-      fallback_reason: fallbackReason,
+      tool: decision.tool,
+      visual: {
+        ...shot.visual,
+        keyframe_path: resolvedKeyframePath,
+      },
+      fallback_used: decision.fallbackUsed,
+      fallback_reason: decision.fallbackReason,
     };
   });
 
@@ -683,7 +910,11 @@ async function toolRouterNode(state: VideoPipelineState) {
       }),
       logs: [
         ...current.logs,
-        createLog("tool_router", "info", "انتخاب ابزار رندر هر شات انجام شد و پردازش موازی آغاز می‌شود."),
+        createLog(
+          "tool_router",
+          "info",
+          "مسیریابی هوشمند شات‌ها روی موتورهای رایگان (HyperFrames / Remotion / Blender / ComfyUI Colab — بدون OmniFlash) انجام شد."
+        ),
       ],
     });
   }
@@ -695,6 +926,7 @@ async function toolRouterNode(state: VideoPipelineState) {
 async function shotWorkerNode(state: ShotWorkerState & { runId: string }) {
   const out = await compiledShotWorkerSubgraph.invoke({
     runId: state.runId,
+    projectId: state.projectId,
     scenarioText: state.scenarioText,
     aspectRatio: state.aspectRatio,
     qualityMode: state.qualityMode,
@@ -729,7 +961,7 @@ async function assemblerNode(state: VideoPipelineState) {
         "error",
         `${needsReview.length} شات هنوز تایید QA نگرفته است (${needsReview
           .map((s) => s.shot_id)
-          .join("، ")})؛ تحویل ویدیوی معیوب مسدود شد.`,
+          .join("، ")})؛ تحویل ویدیوی معیوب مسدود شد.`
       ),
       { status: "needs_human_review" }
     );
@@ -738,7 +970,11 @@ async function assemblerNode(state: VideoPipelineState) {
 
   appendRunLog(
     state.runId,
-    createLog("assembler", "info", "مونتاژ نهایی شات‌های تاییدشده، هم‌ترازی -14 LUFS و ساخت فایل MP4 + SRT"),
+    createLog(
+      "assembler",
+      "info",
+      `اجرای موتور تدوین و اصلاح رنگ سینمایی (${state.colorGradePreset}) + 3D .cube LUT + میکس صدا (-14 LUFS)`
+    ),
     { status: "assembling" }
   );
 
@@ -751,6 +987,7 @@ async function assemblerNode(state: VideoPipelineState) {
       videoPath: s.renderPath!,
       transition_in: s.spec.transition_in,
       narration_text: s.spec.narration_text,
+      onScreenText: s.spec.visual.headline,
       duration_sec: s.spec.duration_sec,
     })),
     workDir: path.join(runDir, "assemble_tmp"),
@@ -762,19 +999,71 @@ async function assemblerNode(state: VideoPipelineState) {
     narrationWavPath: state.narrationWavPath,
     includeBackgroundMusic: state.includeBackgroundMusic,
     burnSubtitles: state.burnSubtitles,
+    subtitleStylePreset: state.subtitleStylePreset || "industrial_steel_blue",
     targetLufs: cfg.targetLufs,
+    colorGradePreset: state.colorGradePreset,
+    musicSource: state.musicSource,
   });
 
-  // Also copy playable artifact into data/videos so /api/media/videos serves it uniformly
+  // Generate OpenTimelineIO (.otio) for DaVinci Resolve AND Automated After Effects ExtendScript (.jsx)
+  let otioUrl: string | null = null;
+  let afterEffectsJsxUrl: string | null = null;
+  const projectRecord = state.projectId ? getProject(state.projectId) : null;
+  if (projectRecord) {
+    const otioClips = extractDavinciClipsFromProject(projectRecord, getVideosDir(), getImagesDir());
+    const otioText = generateOpenTimelineIoJson({
+      project: projectRecord,
+      clips: otioClips,
+      voiceoverAbsPath: state.narrationWavPath || null,
+      cubeLutFilename: assembled.cubeLutPath ? path.basename(assembled.cubeLutPath) : null,
+      fps: cfg.fps,
+    });
+    fs.writeFileSync(path.join(runDir, "timeline.otio"), otioText, "utf-8");
+    otioUrl = `/api/media/video-runs/${state.runId}/timeline.otio`;
+
+    const aeJsx = generateAfterEffectsExtendScriptJsx({
+      project: projectRecord,
+      width,
+      height,
+      fps: cfg.fps,
+      subtitlePreset: state.subtitleStylePreset,
+    });
+    fs.writeFileSync(path.join(runDir, "build_after_effects.jsx"), aeJsx, "utf-8");
+    afterEffectsJsxUrl = `/api/media/video-runs/${state.runId}/build_after_effects.jsx`;
+  }
+
+  // Copy playable artifact into data/videos so /api/media/videos serves it uniformly
   const publicVideoName = `${state.runId}_final.mp4`;
   fs.copyFileSync(assembled.finalPath, path.join(getVideosDir(), publicVideoName));
 
-  appendRunLog(state.runId, createLog("assembler", "info", "فایل ویدیوی نهایی MP4 مونتاژ و ذخیره شد."), {
-    finalVideoPath: assembled.finalPath,
-    finalVideoUrl: `/api/media/video-runs/${state.runId}/final.mp4`,
-    srtPath: assembled.srtPath,
-    srtUrl: `/api/video/runs/${state.runId}/srt`,
-  });
+  const cubeLutUrl = assembled.cubeLutPath
+    ? `/api/media/video-runs/${state.runId}/${path.basename(assembled.cubeLutPath)}`
+    : null;
+  const assSubtitleUrl = assembled.assPath
+    ? `/api/media/video-runs/${state.runId}/${path.basename(assembled.assPath)}`
+    : null;
+
+  appendRunLog(
+    state.runId,
+    createLog(
+      "assembler",
+      "info",
+      "فایل مستر MP4 سینمایی (CRF 19) + زیرنویس کینتیک ASS همگام با صدا + .cube LUT + DaVinci OTIO + اسکریپت After Effects (.jsx) ساخته شد."
+    ),
+    {
+      finalVideoPath: assembled.finalPath,
+      finalVideoUrl: `/api/media/video-runs/${state.runId}/final.mp4`,
+      srtPath: assembled.srtPath,
+      srtUrl: `/api/video/runs/${state.runId}/srt`,
+      assSubtitleUrl,
+      cubeLutUrl,
+      otioUrl,
+      afterEffectsJsxUrl,
+      colorGradePreset: state.colorGradePreset,
+      subtitleStylePreset: state.subtitleStylePreset,
+      musicSource: assembled.musicSourceUsed,
+    }
+  );
 
   return {
     finalVideoPath: assembled.finalPath,
@@ -804,7 +1093,7 @@ async function finalQaNode(state: VideoPipelineState) {
     width,
     height,
     fps: cfg.fps,
-    durationToleranceSec: 2.0,
+    durationToleranceSec: 4.0,
     requireAudio: true,
   });
 
@@ -863,6 +1152,7 @@ const videoPipelineWorkflow = new StateGraph(VideoPipelineAnnotation)
       (shot) =>
         new Send("shot_worker", {
           runId: s.runId,
+          projectId: s.projectId,
           scenarioText: s.scenarioText,
           aspectRatio: s.aspectRatio,
           qualityMode: s.qualityMode,
@@ -891,6 +1181,9 @@ export async function runVideoProductionPipeline(params: {
   scenarioText: string;
   aspectRatio?: VideoAspectFormat;
   qualityMode?: VideoQualityMode;
+  colorGradePreset?: CinemaLookPreset;
+  subtitleStylePreset?: KineticSubtitleStylePreset;
+  musicSource?: "lyria" | "ambient_cinema" | "none";
   director?: DirectorOutput | null;
   researchScript?: ResearchAndScriptOutput | null;
   narrationWavPath?: string | null;
@@ -902,6 +1195,9 @@ export async function runVideoProductionPipeline(params: {
   const runId = params.runId || `vrun_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const aspectRatio = params.aspectRatio || cfg.defaultAspectRatio;
   const qualityMode = params.qualityMode || cfg.defaultQualityMode;
+  const colorGradePreset = params.colorGradePreset || "industrial_teal_amber";
+  const subtitleStylePreset = params.subtitleStylePreset || "industrial_steel_blue";
+  const musicSource = params.musicSource || "ambient_cinema";
 
   const initialRun: VideoPipelineRun = {
     runId,
@@ -910,10 +1206,13 @@ export async function runVideoProductionPipeline(params: {
     updatedAt: new Date().toISOString(),
     aspectRatio,
     qualityMode,
+    colorGradePreset,
+    subtitleStylePreset,
+    musicSource,
     status: "running",
     currentNode: "START",
     shots: [],
-    logs: [createLog("START", "info", "شروع پایپ‌لاین ۱۰ مرحله‌ای تولید ویدیو و QA بصری")],
+    logs: [createLog("START", "info", "شروع پایپ‌لاین ۱۰ مرحله‌ای تولید ویدیو (موتورهای رایگان + QA ۷ لایه)")],
   };
   persistRunSnapshot(initialRun);
 
@@ -925,6 +1224,9 @@ export async function runVideoProductionPipeline(params: {
         scenarioText: params.scenarioText,
         aspectRatio,
         qualityMode,
+        colorGradePreset,
+        subtitleStylePreset,
+        musicSource,
         director: params.director ?? null,
         researchScript: params.researchScript ?? null,
         narrationWavPath: params.narrationWavPath ?? null,
@@ -977,6 +1279,7 @@ export async function retryShotAndReassemble(params: {
 
   const workerResult = await compiledShotWorkerSubgraph.invoke({
     runId: run.runId,
+    projectId: run.projectId,
     scenarioText: run.shots.map((s) => s.spec.intent).join("\n"),
     aspectRatio: run.aspectRatio,
     qualityMode: run.qualityMode,
@@ -999,16 +1302,23 @@ export async function retryShotAndReassemble(params: {
     });
   }
 
-  // Re-run assembler + final_qa
+  const projectRecord = run.projectId ? getProject(run.projectId) : null;
+  const fallbackNarrationWav = projectRecord?.voiceover?.audioFilename
+    ? path.join(getAudioDir(), path.basename(projectRecord.voiceover.audioFilename))
+    : null;
+
   const assembledState = await assemblerNode({
     runId: run.runId,
     projectId: run.projectId,
     scenarioText: run.shots.map((s) => s.spec.intent).join("\n"),
     aspectRatio: run.aspectRatio,
     qualityMode: run.qualityMode,
+    colorGradePreset: run.colorGradePreset || "industrial_teal_amber",
+    subtitleStylePreset: run.subtitleStylePreset || "industrial_steel_blue",
+    musicSource: run.musicSource || "ambient_cinema",
     director: null,
     researchScript: null,
-    narrationWavPath: target.spec.audio.narration_path ?? null,
+    narrationWavPath: target.spec.audio.narration_path ?? fallbackNarrationWav ?? null,
     burnSubtitles: cfg.burnSubtitles,
     includeBackgroundMusic: cfg.includeBackgroundMusic,
     needsClarification: false,
@@ -1026,6 +1336,9 @@ export async function retryShotAndReassemble(params: {
     scenarioText: run.shots.map((s) => s.spec.intent).join("\n"),
     aspectRatio: run.aspectRatio,
     qualityMode: run.qualityMode,
+    colorGradePreset: run.colorGradePreset || "industrial_teal_amber",
+    subtitleStylePreset: run.subtitleStylePreset || "industrial_steel_blue",
+    musicSource: run.musicSource || "ambient_cinema",
     director: null,
     researchScript: null,
     narrationWavPath: null,

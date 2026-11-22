@@ -19,6 +19,7 @@ import {
   type GenerativeVideoRequest,
   type VideoProvider,
 } from "./generative.js";
+import { getActiveRemoteComfyUrl } from "../../cloudGpuNotebooks.js";
 import { ParallaxVideoProvider } from "./parallax.js";
 
 const execFileAsync = promisify(execFile);
@@ -117,11 +118,14 @@ export class ComfyUIProvider implements VideoProvider {
   private readonly autoFallbackToParallax: boolean;
 
   constructor(opts?: ComfyUIProviderOptions) {
-    const hw = detectHardwareSync(opts?.baseUrl);
-    this.baseUrl = (opts?.baseUrl || process.env.COMFYUI_URL || "http://127.0.0.1:8188").replace(
-      /\/+$/,
-      ""
-    );
+    const resolvedBaseUrl = (
+      opts?.baseUrl ||
+      getActiveRemoteComfyUrl() ||
+      process.env.COMFYUI_URL ||
+      "http://127.0.0.1:8188"
+    ).replace(/\/+$/, "");
+    const hw = detectHardwareSync(resolvedBaseUrl);
+    this.baseUrl = resolvedBaseUrl;
     this.profile =
       opts?.profile ||
       (hw.selectedProfile === "parallax_only" ? "wan_2_2_5b_gguf" : hw.selectedProfile);

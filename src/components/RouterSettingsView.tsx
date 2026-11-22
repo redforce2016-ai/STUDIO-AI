@@ -27,16 +27,16 @@ import type {
 import { ProjectsAndDesktopView } from "./ProjectsAndDesktopView";
 
 interface RouterSettingsViewProps {
-  projects: ProjectRecord[];
-  selectedProjectId: string | null;
-  firebaseUser: User | null;
-  cloudProjectCount: number;
-  onGoogleSignIn: () => Promise<void>;
-  onGoogleSignOut: () => Promise<void>;
-  onOpenProject: (project: ProjectRecord) => void;
-  onDeleteProject: (id: string) => Promise<void>;
-  onExportMarkdown: (project: ProjectRecord) => void;
-  onExportJson: (project: ProjectRecord) => void;
+  projects?: ProjectRecord[];
+  selectedProjectId?: string | null;
+  firebaseUser?: User | null;
+  cloudProjectCount?: number;
+  onGoogleSignIn?: () => Promise<void>;
+  onGoogleSignOut?: () => Promise<void>;
+  onOpenProject?: (project: ProjectRecord) => void;
+  onDeleteProject?: (id: string) => Promise<void>;
+  onExportMarkdown?: (project: ProjectRecord) => void;
+  onExportJson?: (project: ProjectRecord) => void;
 }
 
 const AGENT_META: Array<{
@@ -72,10 +72,10 @@ const AGENT_META: Array<{
 ];
 
 export function RouterSettingsView({
-  projects,
-  selectedProjectId,
-  firebaseUser,
-  cloudProjectCount,
+  projects = [],
+  selectedProjectId = null,
+  firebaseUser = null,
+  cloudProjectCount = 0,
   onGoogleSignIn,
   onGoogleSignOut,
   onOpenProject,
@@ -83,11 +83,15 @@ export function RouterSettingsView({
   onExportMarkdown,
   onExportJson,
 }: RouterSettingsViewProps) {
-  const [topSection, setTopSection] = useState<"projects" | "router">("projects");
-  const [subTab, setSubTab] = useState<"agents" | "providers">("agents");
+  const hasProjectsEmbed = Boolean(
+    onOpenProject && onDeleteProject && onExportMarkdown && onExportJson && onGoogleSignIn && onGoogleSignOut
+  );
+  const [topSection, setTopSection] = useState<"projects" | "router">("router");
+  const [subTab, setSubTab] = useState<"providers" | "governance" | "agents">("providers");
   const [config, setConfig] = useState<RouterConfigPublic | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [banner, setBanner] = useState<{ type: "ok" | "error"; text: string } | null>(null);
+  const [resettingCooldowns, setResettingCooldowns] = useState(false);
 
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
 
@@ -163,6 +167,34 @@ export function RouterSettingsView({
         type: "error",
         text: err instanceof Error ? err.message : "خطا در تغییر وضعیت سرویس",
       });
+    }
+  };
+
+  const handleResetCooldowns = async (providerId?: string) => {
+    setResettingCooldowns(true);
+    setBanner(null);
+    try {
+      const res = await fetch("/api/router/cooldowns/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(providerId ? { providerId } : {}),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "بازنشانی محدودیت انجام نشد.");
+      setConfig(data.config);
+      setBanner({
+        type: "ok",
+        text: providerId
+          ? "محدودیت موقت این اکانت بازنشانی شد و دوباره وارد چرخه فالبک شد."
+          : "محدودیت موقت همه اکانت‌ها بازنشانی شد.",
+      });
+    } catch (err) {
+      setBanner({
+        type: "error",
+        text: err instanceof Error ? err.message : "خطا در بازنشانی محدودیت موقت",
+      });
+    } finally {
+      setResettingCooldowns(false);
     }
   };
 
@@ -422,57 +454,59 @@ export function RouterSettingsView({
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      {/* Top Mode Switcher: Projects & Desktop Bundle vs. 100% Free Multi-Model Router */}
+      {/* Top Mode Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-5">
         <div>
           <h1 className="text-lg font-bold text-slate-100">
-            آرشیو پروژه‌ها، بسته نصبی ویندوز و روتر ۱۰۰٪ رایگان مدل‌ها
+            روتر هوشمند ۱۰ اکانت جیمیل، فالبک خودکار و قوانین ضد توکن‌سوزی
           </h1>
           <p className="mt-1 text-xs leading-6 text-slate-400">
-            مدیریت پست‌های ساخته‌شده، دانلود نسخه دسکتاپ آفلاین (مجهز به کلون صدای XTTS-v2) و چیدمان زنجیره فالبک مدل‌های رایگان سرور.
+            مدیریت پایدار سهمیه ۱۰ حساب جیمیل سرور، چرخش خودکار بدون خطا در صورت محدودیت (429) و سیاست انتخاب مدل برای هر مرحله.
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] p-1">
-          <button
-            type="button"
-            onClick={() => setTopSection("projects")}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-              topSection === "projects"
-                ? "bg-amber-500 text-slate-950"
-                : "text-slate-300 hover:text-white"
-            }`}
-          >
-            <FolderOpen className="h-3.5 w-3.5" />
-            <span>پروژه‌ها و نسخه دسکتاپ ({projects.length})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setTopSection("router")}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-              topSection === "router"
-                ? "bg-amber-500 text-slate-950"
-                : "text-slate-300 hover:text-white"
-            }`}
-          >
-            <Server className="h-3.5 w-3.5" />
-            <span>روتر مدل‌های رایگان سرور</span>
-          </button>
-        </div>
+        {hasProjectsEmbed && (
+          <div className="flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] p-1">
+            <button
+              type="button"
+              onClick={() => setTopSection("projects")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                topSection === "projects"
+                  ? "bg-amber-500 text-slate-950"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span>پروژه‌ها و نسخه دسکتاپ ({projects.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setTopSection("router")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                topSection === "router"
+                  ? "bg-amber-500 text-slate-950"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              <Server className="h-3.5 w-3.5" />
+              <span>روتر مدل‌های رایگان سرور</span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {topSection === "projects" ? (
+      {topSection === "projects" && hasProjectsEmbed ? (
         <ProjectsAndDesktopView
           projects={projects}
           selectedProjectId={selectedProjectId}
           firebaseUser={firebaseUser}
           cloudProjectCount={cloudProjectCount}
-          onGoogleSignIn={onGoogleSignIn}
-          onGoogleSignOut={onGoogleSignOut}
-          onOpenProject={onOpenProject}
-          onDeleteProject={onDeleteProject}
-          onExportMarkdown={onExportMarkdown}
-          onExportJson={onExportJson}
+          onGoogleSignIn={onGoogleSignIn!}
+          onGoogleSignOut={onGoogleSignOut!}
+          onOpenProject={onOpenProject!}
+          onDeleteProject={onDeleteProject!}
+          onExportMarkdown={onExportMarkdown!}
+          onExportJson={onExportJson!}
         />
       ) : isLoading || !config ? (
         <div className="space-y-4 rounded-2xl border border-[#262B38] bg-[#14171F] p-8">
@@ -481,17 +515,82 @@ export function RouterSettingsView({
         </div>
       ) : (
         <div className="space-y-5">
-          {/* Sub-navigation inside Free Router */}
+          {/* Persistent Pool & Anti-Token-Burn Summary Strip */}
+          {config.quotaSummary && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-4">
+                <div className="text-[11px] text-slate-400">کلیدهای واقعی فعال سرور</div>
+                <div className="mt-1 font-mono-tabular text-lg font-bold text-emerald-400">
+                  {config.quotaSummary.activeRealGoogleKeyCount} / {config.quotaSummary.totalConfiguredGoogleSlots}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  ذخیره دائمی در Settings &gt; Secrets (بدون کلید موک)
+                </div>
+              </div>
+              <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-4">
+                <div className="text-[11px] text-slate-400">درخواست‌های امروز کل استخر</div>
+                <div className="mt-1 font-mono-tabular text-lg font-bold text-slate-100">
+                  {config.quotaSummary.totalRequestsToday.toLocaleString("en-US")}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  تاریخ سهمیه UTC: {config.quotaSummary.dateKey}
+                </div>
+              </div>
+              <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-4">
+                <div className="text-[11px] text-slate-400">مصرف توکن ثبت‌شده امروز</div>
+                <div className="mt-1 font-mono-tabular text-lg font-bold text-amber-300">
+                  {config.quotaSummary.totalTokensToday.toLocaleString("en-US")}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  قفل ضد توکن‌سوزی ThinkingLevel فعال است
+                </div>
+              </div>
+              <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-4">
+                <div className="text-[11px] text-slate-400">چرخش خودکار فالبک امروز</div>
+                <div className="mt-1 font-mono-tabular text-lg font-bold text-sky-300">
+                  {config.quotaSummary.failoverCountToday}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  سوییچ بی‌خطا هنگام محدودیت سهمیه (429)
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Sub-navigation inside Multi-Account Router */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#14171F] px-4 py-3">
             <div className="flex items-center gap-2 text-xs text-emerald-300">
               <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" />
               <span>
-                امنیت کامل: هیچ کلیدی در مرورگر دریافت یا ذخیره نمی‌شود؛ همه متغیرها مستقیم از محیط سرور (
-                <code className="font-mono-tabular text-slate-200">.env</code>) خوانده می‌شوند.
+                پایداری پس از ریستارت و امنیت: تمام کلیدهای واقعی در محیط سرور (
+                <code className="font-mono-tabular text-slate-200">GEMINI_API_KEY</code> و{" "}
+                <code className="font-mono-tabular text-slate-200">GEMINI_API_KEY_1..10</code>) نگهداری می‌شوند و هرگز کلید موک یا کلاینتی مجاز نیست.
               </span>
             </div>
 
-            <div className="flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] p-1">
+            <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] p-1">
+              <button
+                type="button"
+                onClick={() => setSubTab("providers")}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  subTab === "providers"
+                    ? "bg-amber-500 text-slate-950"
+                    : "text-slate-300 hover:text-white"
+                }`}
+              >
+                ۱۰ اکانت جیمیل و فالبک ({config.providers.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSubTab("governance")}
+                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                  subTab === "governance"
+                    ? "bg-amber-500 text-slate-950"
+                    : "text-slate-300 hover:text-white"
+                }`}
+              >
+                قوانین مدل و ضد توکن‌سوزی ({config.governancePolicy?.length ?? 0})
+              </button>
               <button
                 type="button"
                 onClick={() => setSubTab("agents")}
@@ -502,17 +601,6 @@ export function RouterSettingsView({
                 }`}
               >
                 زنجیره فالبک ایجنت‌ها
-              </button>
-              <button
-                type="button"
-                onClick={() => setSubTab("providers")}
-                className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                  subTab === "providers"
-                    ? "bg-amber-500 text-slate-950"
-                    : "text-slate-300 hover:text-white"
-                }`}
-              >
-                وضعیت سرویس‌های رایگان سرور ({config.providers.length})
               </button>
             </div>
           </div>
@@ -687,12 +775,86 @@ export function RouterSettingsView({
                 );
               })}
             </div>
+          ) : subTab === "governance" ? (
+            /* Anti-Token-Burn Model Governance Matrix */
+            <div className="space-y-4">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs leading-6 text-amber-100">
+                <div className="font-bold text-amber-300 mb-1">
+                  ماتریس دقیق مجوز مصرف مدل‌ها (قفل سخت‌افزاری ضد توکن‌سوزی)
+                </div>
+                روتر پیش از هر فراخوانی، نقش وظیفه و مدل انتخابی را کنترل می‌کند: مدل‌های منسوخ و مدل‌های سنگین استدلال عمیق (Neon/Carbon/Argon) در مراحل عادی تولید مسدود هستند و تمام فراخوانی‌های JSON روی ThinkingLevel.LOW یا MINIMAL قفل می‌شوند.
+              </div>
+
+              <div className="space-y-3">
+                {(config.governancePolicy ?? []).map((rule) => (
+                  <div
+                    key={rule.taskRole}
+                    className="rounded-2xl border border-[#262B38] bg-[#14171F] p-4 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-bold text-slate-100">{rule.titleFa}</div>
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                        <span
+                          className={`rounded-md px-2 py-0.5 font-semibold ${
+                            rule.allowedByDefault
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : "bg-red-500/15 text-red-300"
+                          }`}
+                        >
+                          {rule.allowedByDefault ? "مجاز با شرط" : "مسدود به‌صورت پیش‌فرض"}
+                        </span>
+                        <span className="rounded-md bg-[#0B0D11] px-2 py-0.5 text-amber-300 border border-[#262B38]">
+                          مدل اصلی: {rule.primaryModel}
+                        </span>
+                        {rule.fallbackModel && (
+                          <span className="rounded-md bg-[#0B0D11] px-2 py-0.5 text-sky-300 border border-[#262B38]">
+                            فالبک: {rule.fallbackModel}
+                          </span>
+                        )}
+                        <span className="rounded-md bg-[#0B0D11] px-2 py-0.5 text-slate-300 border border-[#262B38]">
+                          Thinking: {rule.thinkingLevel}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-xs leading-6">
+                      <div className="rounded-xl bg-[#0B0D11]/70 p-3 text-slate-300">
+                        <span className="font-semibold text-sky-300">شرط مجاز بودن اجرا: </span>
+                        {rule.allowedWhenFa}
+                      </div>
+                      <div className="rounded-xl bg-[#0B0D11]/70 p-3 text-slate-300">
+                        <span className="font-semibold text-emerald-300">محدودیت ضد توکن‌سوزی: </span>
+                        {rule.antiTokenBurnRuleFa}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           ) : (
-            /* Server-Env Providers Status & Free Model Discovery (Zero Client Key Inputs) */
-            <div className="space-y-3">
+            /* 10-Account Persistent Server-Env Key Pool & Auto-Failover Dashboard (Zero Client Key Inputs) */
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#262B38] bg-[#14171F]/80 px-4 py-3 text-xs text-slate-300">
+                <span>
+                  هر اکانت جیمیل مرورگر ایجنت به متغیر دائمی خود (<code className="font-mono text-amber-300">GEMINI_API_KEY_1..10</code>) متصل است. هنگام خطای 429 یا پر شدن سهمیه، چرخش به اکانت بعدی خودکار و بدون خطاست.
+                </span>
+                <button
+                  type="button"
+                  disabled={resettingCooldowns}
+                  onClick={() => void handleResetCooldowns()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${resettingCooldowns ? "animate-spin" : ""}`} />
+                  <span>بازنشانی محدودیت موقت همه اکانت‌ها</span>
+                </button>
+              </div>
+
               {config.providers.map((provider) => {
                 const activeCount = provider.models.filter((m) => m.enabled).length;
                 const isBusy = busyProviderId === provider.id;
+                const reqUsed = provider.requestsToday ?? 0;
+                const reqMax = provider.dailyRequestLimit ?? 250;
+                const tokUsed = provider.tokensToday ?? 0;
+                const tokMax = provider.dailyTokenBudget ?? 400_000;
 
                 return (
                   <div
@@ -706,7 +868,7 @@ export function RouterSettingsView({
                           <span aria-hidden="true" className="text-slate-600">·</span>
                           <span
                             className={
-                              provider.hasApiKey ? "text-emerald-400" : "text-slate-400"
+                              provider.hasApiKey ? "text-emerald-400 font-semibold" : "text-slate-400"
                             }
                           >
                             {provider.maskedKey}
@@ -716,8 +878,18 @@ export function RouterSettingsView({
                             {activeCount} مدل فعال از {provider.models.length}
                           </span>
                         </div>
-                        <div dir="ltr" className="text-right text-[11px] text-slate-500">
-                          {provider.baseUrl || "Google GenAI Native SDK"}
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+                          {provider.linkedProfileEmail && (
+                            <span dir="ltr" className="font-mono text-sky-300">
+                              {provider.linkedProfileEmail}
+                            </span>
+                          )}
+                          <span className="font-mono-tabular">
+                            درخواست امروز: {reqUsed}/{reqMax}
+                          </span>
+                          <span className="font-mono-tabular">
+                            توکن امروز: {tokUsed.toLocaleString("en-US")}/{tokMax.toLocaleString("en-US")}
+                          </span>
                         </div>
                       </div>
 
@@ -730,9 +902,24 @@ export function RouterSettingsView({
                             : "bg-slate-700/40 text-slate-400 hover:text-slate-200"
                         }`}
                       >
-                        {provider.enabled ? "فعال در زنجیره" : "غیرفعال"}
+                        {provider.enabled ? "فعال در چرخه فالبک" : "غیرفعال"}
                       </button>
                     </div>
+
+                    {provider.cooldownUntil && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                        <span>
+                          در حالت انتظار موقت فالبک: {provider.cooldownReasonFa || "محدودیت سهمیه"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void handleResetCooldowns(provider.id)}
+                          className="rounded-md bg-amber-500/20 px-2.5 py-1 text-[11px] font-semibold text-amber-200 hover:bg-amber-500/30"
+                        >
+                          بازنشانی فوری
+                        </button>
+                      </div>
+                    )}
 
                     {provider.lastTestMessage && (
                       <div
@@ -776,12 +963,33 @@ export function RouterSettingsView({
                         className="inline-flex items-center gap-1.5 rounded-xl border border-[#262B38] bg-[#0B0D11] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-40 whitespace-nowrap"
                       >
                         <RefreshCw className={`h-3.5 w-3.5 ${isBusy ? "animate-spin" : ""}`} />
-                        <span>تست سلامت ارتباط</span>
+                        <span>تست کم‌مصرف اتصال</span>
                       </button>
                     </div>
                   </div>
                 );
               })}
+
+              {config.quotaSummary?.recentFailovers && config.quotaSummary.recentFailovers.length > 0 && (
+                <div className="rounded-2xl border border-[#262B38] bg-[#14171F] p-5 space-y-2.5">
+                  <h3 className="text-xs font-bold text-sky-300">
+                    گزارش چرخش‌های خودکار اخیر بین اکانت‌ها (Auto-Failover Log)
+                  </h3>
+                  <div className="space-y-1.5">
+                    {config.quotaSummary.recentFailovers.slice(0, 6).map((ev) => (
+                      <div
+                        key={ev.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#0B0D11] px-3 py-2 text-[11px] text-slate-300"
+                      >
+                        <span className="font-mono text-amber-300">
+                          {ev.fromProviderId} → {ev.toProviderId} ({ev.modelId})
+                        </span>
+                        <span>{ev.reasonFa}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

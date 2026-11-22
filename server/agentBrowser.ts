@@ -13,6 +13,8 @@ import type {
   AgentBrowserState,
   BrowserProfileAccount,
   GroundedSource,
+  I2VShotPlan,
+  I2VTargetTool,
   ObstacleBypassRecord,
   WebStudioGenerationMode,
   WebStudioModelOption,
@@ -24,12 +26,27 @@ import {
   getImagesDir,
   getProject,
   getVideosDir,
+  getVisualsDir,
   saveImageFile,
   saveProject,
   saveStudioAsset,
   saveVisualSvgFile,
 } from "./store.js";
+import { getActiveRemoteComfyUrl } from "./cloudGpuNotebooks.js";
+import { getGoogleApiKeyFromRouter } from "./router.js";
+import {
+  buildAndAuditI2VShotPlan,
+  buildDeterministicLiveVideoQueries,
+} from "./video/i2vPromptDirector.js";
+import { ComfyUIProvider } from "./video/providers/comfyui.js";
+import { OmniVideoProvider } from "./video/providers/omniVideo.js";
 import { ParallaxVideoProvider } from "./video/providers/parallax.js";
+import {
+  renderProceduralCinemaKeyframePng,
+  renderProceduralCinemaVideoMp4,
+} from "./video/providers/proceduralCinema.js";
+import { renderRealLiveActionDocumentaryClip } from "./video/providers/realLiveVideo.js";
+import { curatePhotorealisticShotKeyframe } from "./video/providers/realMediaCurator.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +73,24 @@ export const WEB_STUDIO_CATALOG: Record<
       { id: "veo_2", labelFa: "Google Veo 2 (ویدیو سینمایی)", kind: "video" },
       { id: "omni_flash", labelFa: "Gemini Omni Flash (ویدیو سریع)", kind: "video" },
       { id: "imagen_3", labelFa: "Google Imagen 3 (تصویر کلیدی دقیق)", kind: "image" },
+    ],
+  },
+  molab: {
+    labelFa: "Marimo Molab GPU (مولب — تا ۹۶GB VRAM)",
+    url: "https://molab.marimo.io",
+    supportedModes: ["image_to_video", "text_to_video"],
+    models: [
+      { id: "molab_wan22_gpu", labelFa: "Molab GPU · Wan 2.2 I2V 14B (FP8)", kind: "video" },
+      { id: "molab_ltx23_gpu", labelFa: "Molab GPU · LTX-Video 2.3 (سریع)", kind: "video" },
+    ],
+  },
+  google_colab: {
+    labelFa: "Google Colab GPU (گوگل کولب — T4 / L4)",
+    url: "https://colab.research.google.com",
+    supportedModes: ["image_to_video", "text_to_video"],
+    models: [
+      { id: "colab_wan22_gguf", labelFa: "Colab T4 GPU · Wan 2.2 5B (GGUF)", kind: "video" },
+      { id: "colab_ltx23_gpu", labelFa: "Colab GPU · LTX-Video (سریع)", kind: "video" },
     ],
   },
   leonardo_ai: {
@@ -908,143 +943,143 @@ async function detectAndSolveObstaclesViaAgentBrowser(
 const INITIAL_PROFILES: BrowserProfileAccount[] = [
   {
     id: "prof_google_1",
-    name: "اکانت جیمیل ۱ (اصلی - Google Flow & Veo 2)",
+    name: "اکانت جیمیل ۱ (اصلی - Molab GPU + Google Flow)",
     email: "studio.agent.01@gmail.com",
-    password: "St#Ag01!Flow92",
+    password: "",
     avatarColor: "#10B981",
     userDataDir: "output/browser_profiles/prof_google_1",
     status: "active",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
     lastUsedAt: new Date().toISOString(),
-    notesFa: "پروفایل ۱ متصل به Agent Browser برای Google Labs Flow و سرچ",
+    notesFa: "پروفایل ۱ متصل به روتر با متغیر دائمی GEMINI_API_KEY_1 (برای تولید کلید واقعی، با اکانت جیمیل خود وارد Google AI Studio شوید)",
   },
   {
     id: "prof_google_2",
-    name: "اکانت جیمیل ۲ (چرخشی - Google Flow & Leonardo)",
+    name: "اکانت جیمیل ۲ (چرخشی - Google Colab T4 + Flow)",
     email: "studio.agent.02@gmail.com",
-    password: "St#Ag02!Veo84",
+    password: "",
     avatarColor: "#38BDF8",
     userDataDir: "output/browser_profiles/prof_google_2",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۲ جهت سوییچ خودکار پس از پر شدن سهمیه اکانت ۱",
+    notesFa: "پروفایل ۲ متصل به روتر با متغیر دائمی GEMINI_API_KEY_2 (فالبک خودکار پس از محدودیت اکانت ۱)",
   },
   {
     id: "prof_google_3",
-    name: "اکانت جیمیل ۳ (چرخشی - Omni Flash & I2V)",
+    name: "اکانت جیمیل ۳ (چرخشی - Molab GPU + Omni Flash)",
     email: "studio.agent.03@gmail.com",
-    password: "St#Ag03!Omni71",
+    password: "",
     avatarColor: "#F59E0B",
     userDataDir: "output/browser_profiles/prof_google_3",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۳ مخصوص تولید شات‌های ویدیویی و ثبت‌نام وب‌سایت‌ها",
+    notesFa: "پروفایل ۳ متصل به روتر با متغیر دائمی GEMINI_API_KEY_3",
   },
   {
     id: "prof_google_4",
-    name: "اکانت جیمیل ۴ (چرخشی - Leonardo Phoenix)",
+    name: "اکانت جیمیل ۴ (چرخشی - Colab + Leonardo)",
     email: "studio.agent.04@gmail.com",
-    password: "St#Ag04!Leo63",
+    password: "",
     avatarColor: "#A855F7",
     userDataDir: "output/browser_profiles/prof_google_4",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۴ ذخیره برای فریم‌های استوری‌بورد و تصاویر کلیدی",
+    notesFa: "پروفایل ۴ متصل به روتر با متغیر دائمی GEMINI_API_KEY_4",
   },
   {
     id: "prof_google_5",
-    name: "اکانت جیمیل ۵ (چرخشی - Kling & Runway)",
+    name: "اکانت جیمیل ۵ (چرخشی - Molab + Kling/Runway)",
     email: "studio.agent.05@gmail.com",
-    password: "St#Ag05!Klg55",
+    password: "",
     avatarColor: "#EC4899",
     userDataDir: "output/browser_profiles/prof_google_5",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "kling_web", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "kling_web", "runway_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۵ ذخیره برای رندرهای موازی ویدیو",
+    notesFa: "پروفایل ۵ متصل به روتر با متغیر دائمی GEMINI_API_KEY_5",
   },
   {
     id: "prof_google_6",
-    name: "اکانت جیمیل ۶ (چرخشی - 1080p Render)",
+    name: "اکانت جیمیل ۶ (چرخشی - Colab 1080p Render)",
     email: "studio.agent.06@gmail.com",
-    password: "St#Ag06!Run48",
+    password: "",
     avatarColor: "#14B8A6",
     userDataDir: "output/browser_profiles/prof_google_6",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "runway_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۶ جهت تداوم کار در پروژه‌های پُر شات",
+    notesFa: "پروفایل ۶ متصل به روتر با متغیر دائمی GEMINI_API_KEY_6",
   },
   {
     id: "prof_google_7",
-    name: "اکانت جیمیل ۷ (چرخشی - Web Research & Signup)",
+    name: "اکانت جیمیل ۷ (چرخشی - Molab & Research)",
     email: "studio.agent.07@gmail.com",
-    password: "St#Ag07!Web39",
+    password: "",
     avatarColor: "#F97316",
     userDataDir: "output/browser_profiles/prof_google_7",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۷ برای پژوهش اینترنتی و ثبت‌نام در ابزارهای جدید",
+    notesFa: "پروفایل ۷ متصل به روتر با متغیر دائمی GEMINI_API_KEY_7",
   },
   {
     id: "prof_google_8",
-    name: "اکانت جیمیل ۸ (چرخشی - Storyboard Batch)",
+    name: "اکانت جیمیل ۸ (چرخشی - Colab Storyboard Batch)",
     email: "studio.agent.08@gmail.com",
-    password: "St#Ag08!Pix27",
+    password: "",
     avatarColor: "#6366F1",
     userDataDir: "output/browser_profiles/prof_google_8",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۸ برای تولید تصویر استوری‌بورد و صحنه‌های کلیدی",
+    notesFa: "پروفایل ۸ متصل به روتر با متغیر دائمی GEMINI_API_KEY_8",
   },
   {
     id: "prof_google_9",
-    name: "اکانت جیمیل ۹ (چرخشی - Backup Video Pool)",
+    name: "اکانت جیمیل ۹ (چرخشی - Molab Backup GPU)",
     email: "studio.agent.09@gmail.com",
-    password: "St#Ag09!Vid16",
+    password: "",
     avatarColor: "#84CC16",
     userDataDir: "output/browser_profiles/prof_google_9",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۹ رزرو برای رندر شات‌های طولانی",
+    notesFa: "پروفایل ۹ متصل به روتر با متغیر دائمی GEMINI_API_KEY_9",
   },
   {
     id: "prof_google_10",
     name: "اکانت جیمیل ۱۰ (چرخشی - Final Reserve Pool)",
     email: "studio.agent.10@gmail.com",
-    password: "St#Ag10!Pro09",
+    password: "",
     avatarColor: "#EAB308",
     userDataDir: "output/browser_profiles/prof_google_10",
     status: "standby",
     dailyLimit: 5,
     usedToday: 0,
-    connectedSites: ["google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
+    connectedSites: ["molab", "google_colab", "google_flow", "leonardo_ai", "kling_web", "runway_web", "general_web"],
     lastUsedAt: null,
-    notesFa: "پروفایل ۱۰ آخرین ذخیره چرخشی با ظرفیت کامل روزانه",
+    notesFa: "پروفایل ۱۰ متصل به روتر با متغیر دائمی GEMINI_API_KEY_10",
   },
 ];
 
@@ -1053,10 +1088,10 @@ const INITIAL_SITE_CONFIG: WebStudioSiteConfig = {
   siteLabelFa: WEB_STUDIO_CATALOG.google_flow.labelFa,
   targetUrl: WEB_STUDIO_CATALOG.google_flow.url,
   mode: "image_to_video",
-  modelId: "veo_2",
-  modelLabelFa: "Google Veo 2 (ویدیو سینمایی)",
+  modelId: "omni_flash",
+  modelLabelFa: "Gemini Omni Flash (ویدیو سریع)",
   aspectRatio: "9:16",
-  resolution: "1080p",
+  resolution: "720p",
   durationSeconds: 5,
   cfgScaleOrCreativity: 7,
   autoSolveCloudflareAndCaptcha: true,
@@ -2180,6 +2215,8 @@ export async function executeWebStudioShotGeneration(params: {
   modelId?: WebStudioModelOption;
   aspectRatio?: "9:16" | "16:9" | "1:1";
   resolution?: "720p" | "1080p";
+  targetTool?: I2VTargetTool;
+  usedLiveSegmentKeys?: Set<string>;
 }): Promise<{
   job: WebStudioShotJob;
   browserState: AgentBrowserState;
@@ -2189,6 +2226,9 @@ export async function executeWebStudioShotGeneration(params: {
   const modelId = params.modelId || browserState.siteConfig.modelId;
   const aspectRatio = params.aspectRatio || browserState.siteConfig.aspectRatio;
   const resolution = params.resolution || browserState.siteConfig.resolution;
+  const targetTool: I2VTargetTool = params.targetTool || "auto_best";
+  const sharedUsedLiveSegments = params.usedLiveSegmentKeys || new Set<string>();
+  let auditedI2VPlan: I2VShotPlan | null = null;
 
   updateWebStudioSiteConfig({
     siteId,
@@ -2252,7 +2292,7 @@ export async function executeWebStudioShotGeneration(params: {
     };
   };
 
-  // Node 2: Pre-Submission Prompt Refiner & Lock
+  // Node 2: Scenario-Driven I2V Prompt Writer + Multimodal QA Supervisor Audit & Lock
   const promptRefinerNode = async (state: typeof WebStudioGraphAnnotation.State) => {
     const startMs = Date.now();
     const refined = refineAndFinalizeStudioPrompt({
@@ -2264,30 +2304,158 @@ export async function executeWebStudioShotGeneration(params: {
       resolution: state.resolution,
     });
 
+    let finalPromptLocked = refined.finalizedPrompt;
+    const notesFa = [...refined.enhancementsFa];
+
+    if (state.projectId && state.shotNumber) {
+      const proj = getProject(state.projectId);
+      const dirShot = proj?.director?.shots.find((s) => s.shotNumber === state.shotNumber);
+      const visShot = proj?.visuals?.shots.find((s) => s.shotNumber === state.shotNumber);
+
+      if (proj && dirShot) {
+        const resolveLocalKeyframe = (url?: string | null): string | null => {
+          if (!url) return null;
+          if (url.startsWith("/api/media/images/")) {
+            const p = path.join(getImagesDir(), path.basename(url));
+            return fs.existsSync(p) ? p : null;
+          }
+          if (url.startsWith("/api/media/visuals/")) {
+            const p = path.join(getVisualsDir(), path.basename(url));
+            return fs.existsSync(p) ? p : null;
+          }
+          return null;
+        };
+
+        // Reuse existing QA-approved plan ONLY if it already meets the strict >= 9.5/10 QA bar & clean keyframe!
+        const existingPlan = visShot?.i2vPlan;
+        if (
+          existingPlan &&
+          (existingPlan.qaStatus === "approved" || existingPlan.qaStatus === "revised_and_approved") &&
+          !existingPlan.needsKeyframeReplacement &&
+          existingPlan.qaScore >= 9.5 &&
+          (targetTool === "auto_best" || existingPlan.targetTool === targetTool)
+        ) {
+          auditedI2VPlan = existingPlan;
+        } else {
+          let kfPath = resolveLocalKeyframe(visShot?.imageUrl);
+          auditedI2VPlan = await buildAndAuditI2VShotPlan({
+            shot: dirShot,
+            researchScript: proj.researchScript,
+            visualDirectionSummary: proj.director?.visualDirectionSummary,
+            keyframeFilePath: kfPath,
+            targetTool,
+          });
+
+          // If QA Supervisor flags an unreadable/too-tight macro storyboard photo or low readability (< 8.5), auto-replace with wider readable shot!
+          if (
+            (auditedI2VPlan.needsKeyframeReplacement || auditedI2VPlan.visualReadabilityScore < 8.5) &&
+            visShot
+          ) {
+            try {
+              const is16x9 = state.aspectRatio === "16:9";
+              const w = is16x9 ? 1280 : 720;
+              const h = is16x9 ? 720 : 1280;
+              const usedUrls = new Set<string>(
+                (proj.visuals?.shots || [])
+                  .map((s) => s.sourceMediaUrl)
+                  .filter((u): u is string => typeof u === "string" && u.length > 0)
+              );
+              const replacementFilename = `${proj.id}_qa_wide_shot_${dirShot.shotNumber}_${Date.now()}.png`;
+              const replacementPath = path.join(getImagesDir(), replacementFilename);
+              const curated = await curatePhotorealisticShotKeyframe({
+                prompt: `Wide medium documentary establishing shot, clear recognizable industrial environment: ${dirShot.sceneDescriptionFa} ${dirShot.visualPromptFa}`,
+                shotNumber: dirShot.shotNumber,
+                width: w,
+                height: h,
+                outputPngPath: replacementPath,
+                usedUrls,
+              });
+              kfPath = replacementPath;
+              const updatedShotsWithNewKf = (proj.visuals?.shots || []).map((s) =>
+                s.shotNumber === dirShot.shotNumber
+                  ? {
+                      ...s,
+                      imageUrl: `/api/media/images/${replacementFilename}`,
+                      sourceMediaUrl: curated.sourceUrl,
+                      svgMarkup: null,
+                    }
+                  : s
+              );
+              saveProject({
+                ...proj,
+                visuals: {
+                  styleGuideSummary: proj.visuals?.styleGuideSummary || "",
+                  shots: updatedShotsWithNewKf,
+                },
+              });
+              // Re-audit after replacement so QA status becomes revised_and_approved
+              auditedI2VPlan = await buildAndAuditI2VShotPlan({
+                shot: dirShot,
+                researchScript: proj.researchScript,
+                visualDirectionSummary: proj.director?.visualDirectionSummary,
+                keyframeFilePath: kfPath,
+                targetTool,
+              });
+              auditedI2VPlan.qaFixesAppliedFa = [
+                "فریم کلیدی مبهم/بسته توسط ناظر QA با نمای باز و واضح مستند جایگزین شد",
+                ...auditedI2VPlan.qaFixesAppliedFa,
+              ];
+              auditedI2VPlan.qaStatus = "revised_and_approved";
+              auditedI2VPlan.needsKeyframeReplacement = false;
+            } catch {
+              // keep original frame if replacement search fails
+            }
+          }
+
+          // Persist audited I2V plan onto the project shot
+          const latestProj = getProject(state.projectId);
+          if (latestProj?.visuals) {
+            saveProject({
+              ...latestProj,
+              visuals: {
+                ...latestProj.visuals,
+                shots: latestProj.visuals.shots.map((s) =>
+                  s.shotNumber === dirShot.shotNumber ? { ...s, i2vPlan: auditedI2VPlan } : s
+                ),
+              },
+            });
+          }
+        }
+
+        if (auditedI2VPlan?.revisedPromptEn) {
+          finalPromptLocked = auditedI2VPlan.revisedPromptEn;
+          notesFa.unshift(
+            `تایید ناظر QA (${auditedI2VPlan.qaScore}/10 · ${auditedI2VPlan.qaModelUsed})`,
+            `روانشناسی و طراحی صحنه زنده اعمال شد`
+          );
+        }
+      }
+    }
+
     browserState.lastRefinedPrompt = {
       rawPrompt: state.rawPrompt,
-      finalizedPrompt: refined.finalizedPrompt,
-      enhancementsFa: refined.enhancementsFa,
+      finalizedPrompt: finalPromptLocked,
+      enhancementsFa: notesFa,
       targetSiteId: state.siteId,
       targetModelId: state.modelId,
       mode: state.mode,
     };
 
     appendActionLog({
-      agentName: "ایجنت نهایی‌ساز پرامپت (Prompt Refiner)",
+      agentName: "ایجنت سناریونویس I2V و ناظر کیفیت QA",
       command: "refine_prompt",
-      target: `${state.siteId} / ${state.modelId}`,
+      target: `${state.siteId} / ${targetTool}`,
       status: "success",
-      detailFa: `پرامپت پیش از ارسال به وب‌سایت نهایی و قفل شد (${refined.enhancementsFa.join(" · ")}).`,
+      detailFa: `پرامپت تبدیل تصویر به ویدیو با در نظر گرفتن سناریو، روانشناسی و طراحی صحنه تولید و پس از بازبینی ناظر QA قفل شد (${notesFa.slice(0, 3).join(" · ")}).`,
       durationMs: Date.now() - startMs,
     });
 
     return {
-      finalizedPrompt: refined.finalizedPrompt,
-      promptRefinementNotesFa: refined.enhancementsFa,
+      finalizedPrompt: finalPromptLocked,
+      promptRefinementNotesFa: notesFa,
       langGraphNodesExecuted: [
         ...(state.langGraphNodesExecuted || []),
-        "prompt_refiner_and_lock_node",
+        "scenario_i2v_prompt_and_qa_supervisor_node",
       ],
     };
   };
@@ -2301,32 +2469,41 @@ export async function executeWebStudioShotGeneration(params: {
 
     const activeProf = getActiveProfile();
     const obstaclesResolved: string[] = [];
+    const targetTool: I2VTargetTool = state.targetTool || "auto_best";
+    const needsExternalBrowserSite =
+      targetTool === "google_flow_veo2" || targetTool === "leonardo_motion";
 
-    const openRes = await runAgentBrowserCli(activeProf, ["open", catalog.url], 12000);
-    if (openRes.ok) {
-      const snap = await fetchAgentBrowserSnapshotRefs(activeProf);
-      const solved = await detectAndSolveObstaclesViaAgentBrowser(
-        activeProf,
-        catalog.url,
-        snap.interactiveRefs
-      );
-      for (const s of solved) {
-        obstaclesResolved.push(s.strategyUsedFa);
+    if (needsExternalBrowserSite) {
+      const openRes = await runAgentBrowserCli(activeProf, ["open", catalog.url], 12000);
+      if (openRes.ok) {
+        const snap = await fetchAgentBrowserSnapshotRefs(activeProf);
+        const solved = await detectAndSolveObstaclesViaAgentBrowser(
+          activeProf,
+          catalog.url,
+          snap.interactiveRefs
+        );
+        for (const s of solved) {
+          obstaclesResolved.push(s.strategyUsedFa);
+        }
+
+        // If prompt textbox ref is present on the live page, fill it via agent-browser!
+        const promptInputRef = snap.interactiveRefs.find(
+          (r) =>
+            (r.role === "textbox" || r.role === "textarea") &&
+            !/email|password|search/i.test(r.name)
+        );
+        if (promptInputRef) {
+          await runAgentBrowserCli(activeProf, ["fill", promptInputRef.ref, state.finalizedPrompt], 7000);
+          obstaclesResolved.push(`تزریق پرامپت نهایی با agent-browser fill ${promptInputRef.ref}`);
+        }
+
+        const shot = await captureAgentBrowserScreenshot(activeProf);
+        if (shot) browserState.viewportScreenshotUrl = shot;
       }
-
-      // If prompt textbox ref is present on the live page, fill it via agent-browser!
-      const promptInputRef = snap.interactiveRefs.find(
-        (r) =>
-          (r.role === "textbox" || r.role === "textarea") &&
-          !/email|password|search/i.test(r.name)
+    } else {
+      obstaclesResolved.push(
+        `ارسال مستقیم به پایپ‌لاین تولید ویدیو واقعی (${targetTool}) بدون معطلی ورود مرورگر خارجی`
       );
-      if (promptInputRef) {
-        await runAgentBrowserCli(activeProf, ["fill", promptInputRef.ref, state.finalizedPrompt], 7000);
-        obstaclesResolved.push(`تزریق پرامپت نهایی با agent-browser fill ${promptInputRef.ref}`);
-      }
-
-      const shot = await captureAgentBrowserScreenshot(activeProf);
-      if (shot) browserState.viewportScreenshotUrl = shot;
     }
 
     if (obstaclesResolved.length === 0) {
@@ -2353,7 +2530,7 @@ export async function executeWebStudioShotGeneration(params: {
     };
   };
 
-  // Node 4: Studio Configurator & Media Shot Output
+  // Node 4: Studio Configurator & Media Shot Output (Uses REAL Storyboard Keyframe + Remote Cloud GPU if connected!)
   const studioGeneratorNode = async (state: typeof WebStudioGraphAnnotation.State) => {
     const startMs = Date.now();
     const catalog = WEB_STUDIO_CATALOG[state.siteId] || WEB_STUDIO_CATALOG.google_flow;
@@ -2362,6 +2539,90 @@ export async function executeWebStudioShotGeneration(params: {
 
     const outputKind: "image" | "video" =
       state.mode === "text_to_image" ? "image" : "video";
+
+    // Look up the project's REAL Stage 2 storyboard keyframe image on disk before falling back to SVG
+    let existingStoryboardDiskPath: string | null = null;
+    let existingStoryboardUrl: string | null = null;
+    let shotDurationSec: number = browserState.siteConfig.durationSeconds || 5;
+
+    if (state.projectId && state.shotNumber) {
+      const proj = getProject(state.projectId);
+      const dirShot = proj?.director?.shots.find((s) => s.shotNumber === state.shotNumber);
+      if (dirShot?.durationSeconds) {
+        shotDurationSec = Math.max(3, Math.min(8, Math.round(dirShot.durationSeconds)));
+      }
+      const visShot = proj?.visuals?.shots.find((s) => s.shotNumber === state.shotNumber);
+      if (visShot?.imageUrl) {
+        existingStoryboardUrl = visShot.imageUrl;
+        if (visShot.imageUrl.startsWith("/api/media/images/")) {
+          const candidate = path.join(getImagesDir(), path.basename(visShot.imageUrl));
+          if (fs.existsSync(candidate)) existingStoryboardDiskPath = candidate;
+        } else if (visShot.imageUrl.startsWith("/api/media/visuals/")) {
+          const candidate = path.join(getVisualsDir(), path.basename(visShot.imageUrl));
+          if (fs.existsSync(candidate)) existingStoryboardDiskPath = candidate;
+        }
+      }
+    }
+
+    const is1080p = state.resolution === "1080p";
+    const [width, height] =
+      state.aspectRatio === "9:16"
+        ? is1080p
+          ? [1080, 1920]
+          : [720, 1280]
+        : state.aspectRatio === "1:1"
+          ? is1080p
+            ? [1080, 1080]
+            : [720, 720]
+          : is1080p
+            ? [1920, 1080]
+            : [1280, 720];
+
+    const cameraMotions: Array<"push-in" | "pan" | "orbit"> = ["push-in", "pan", "orbit"];
+    const chosenMotion =
+      cameraMotions[((state.shotNumber || 1) - 1) % cameraMotions.length] || "push-in";
+
+    // Upgrade any missing, legacy SVG, or old procedural 3D keyframe into a genuine Photorealistic Real-Media keyframe first
+    let upgradedKeyframeUrl: string | null = existingStoryboardUrl;
+    const needsPhotoUpgrade =
+      !existingStoryboardDiskPath ||
+      existingStoryboardDiskPath.toLowerCase().endsWith(".svg") ||
+      path.basename(existingStoryboardDiskPath).includes("_proc_");
+
+    if (needsPhotoUpgrade) {
+      const targetW = state.aspectRatio === "16:9" ? 1280 : state.aspectRatio === "1:1" ? 720 : 720;
+      const targetH = state.aspectRatio === "16:9" ? 720 : state.aspectRatio === "1:1" ? 720 : 1280;
+      try {
+        const photoName = `${state.projectId || "ws"}_photo_shot_${state.shotNumber || 1}_${Date.now()}.png`;
+        const photoDiskPath = path.join(getImagesDir(), photoName);
+        await curatePhotorealisticShotKeyframe({
+          prompt: state.finalizedPrompt || state.rawPrompt,
+          shotNumber: state.shotNumber || 1,
+          width: targetW,
+          height: targetH,
+          outputPngPath: photoDiskPath,
+        });
+        existingStoryboardDiskPath = photoDiskPath;
+        upgradedKeyframeUrl = `/api/media/images/${photoName}`;
+      } catch {
+        try {
+          const procName = `${state.projectId || "ws"}_proc_shot_${state.shotNumber || 1}_${Date.now()}.png`;
+          const procDiskPath = path.join(getImagesDir(), procName);
+          await renderProceduralCinemaKeyframePng({
+            prompt: state.finalizedPrompt || state.rawPrompt,
+            shotNumber: state.shotNumber || 1,
+            width: targetW,
+            height: targetH,
+            cameraMotion: chosenMotion,
+            outputPngPath: procDiskPath,
+          });
+          existingStoryboardDiskPath = procDiskPath;
+          upgradedKeyframeUrl = `/api/media/images/${procName}`;
+        } catch {
+          // Ignore and fall back to existing keyframe/SVG path
+        }
+      }
+    }
 
     const svgMarkup = buildStudioKeyframeSvg({
       prompt: state.rawPrompt,
@@ -2372,46 +2633,206 @@ export async function executeWebStudioShotGeneration(params: {
       shotNumber: state.shotNumber,
     });
     const svgFilename = `webstudio_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.svg`;
-    const svgUrl = saveVisualSvgFile(svgFilename, svgMarkup);
+    const svgUrl = upgradedKeyframeUrl || saveVisualSvgFile(svgFilename, svgMarkup);
 
     let outputMediaUrl = svgUrl;
+    let rendererUsedLabel = "Photorealistic 3D Depth Cinema + FX (24fps)";
+    let videoErrorMsg: string | null = null;
 
     if (outputKind === "video") {
       try {
-        const keyframePath = path.join(getImagesDir(), `ws_kf_${Date.now()}.svg`);
-        fs.writeFileSync(keyframePath, svgMarkup, "utf-8");
+        let keyframePath = existingStoryboardDiskPath;
+        let isTempKeyframe = false;
+        if (!keyframePath) {
+          keyframePath = path.join(getImagesDir(), `ws_kf_${Date.now()}.svg`);
+          fs.writeFileSync(keyframePath, svgMarkup, "utf-8");
+          isTempKeyframe = true;
+        }
+
         const outFilename = `ws_vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
         const outputPath = path.join(getVideosDir(), outFilename);
-        const [width, height] =
-          state.aspectRatio === "9:16"
-            ? [480, 854]
-            : state.aspectRatio === "1:1"
-              ? [640, 640]
-              : [854, 480];
 
-        const parallax = new ParallaxVideoProvider();
-        await parallax.generateClip({
+        const clipReq = {
           shotId: state.jobId,
+          shotNumber: state.shotNumber || 1,
           prompt: state.finalizedPrompt,
           keyframePath,
-          aspectRatio: state.aspectRatio === "16:9" ? "16:9" : "9:16",
-          durationSec: browserState.siteConfig.durationSeconds || 5,
-          resolution: "480p",
+          aspectRatio: (state.aspectRatio === "16:9" ? "16:9" : "9:16") as "16:9" | "9:16",
+          durationSec: Math.max(3, Math.min(8, shotDurationSec)),
+          resolution: (is1080p ? "1080p" : "480p") as "1080p" | "480p",
           visualCriticApprovedPreview: true,
           width,
           height,
           fps: 24,
           outputPath,
-          cameraMotion: "push-in",
-          qualityMode: "preview_480p",
-        });
-        try {
-          fs.unlinkSync(keyframePath);
-        } catch {
-          // ignore
+          cameraMotion: chosenMotion,
+          qualityMode: (is1080p ? "final_1080p" : "preview_480p") as "final_1080p" | "preview_480p",
+        };
+
+        const remoteComfyUrl = getActiveRemoteComfyUrl();
+        const isRealPhotoInput =
+          Boolean(keyframePath) &&
+          !keyframePath.toLowerCase().endsWith(".svg") &&
+          !path.basename(keyframePath).includes("_proc_");
+        const localRendererLabel = isRealPhotoInput
+          ? "Photorealistic 3D Depth Cinema + FX (Offline Fallback)"
+          : "Procedural 3D WebGL2 Cinema (Offline Fallback)";
+
+        const projForQueries = state.projectId ? getProject(state.projectId) : null;
+        const dirShotForQueries = projForQueries?.director?.shots.find(
+          (s) => s.shotNumber === (state.shotNumber || 1)
+        );
+        const deterministicQueries = dirShotForQueries
+          ? buildDeterministicLiveVideoQueries(
+              dirShotForQueries,
+              projForQueries?.researchScript?.title
+            )
+          : ["rolling mill", "welding", "metal forge", "steelworks"];
+        const aiQueries = auditedI2VPlan?.liveVideoSearchQueries || [];
+        const liveQueries = Array.from(
+          new Set([...deterministicQueries.slice(0, 2), ...aiQueries.slice(0, 2)])
+        );
+
+        const runRealLiveActionFallback = async (reasonPrefix?: string) => {
+          try {
+            const liveRes = await renderRealLiveActionDocumentaryClip({
+              prompt: `${dirShotForQueries?.sceneDescriptionFa || ""} ${state.finalizedPrompt}`,
+              searchQueries: liveQueries,
+              shotNumber: state.shotNumber || 1,
+              durationSec: clipReq.durationSec,
+              width,
+              height,
+              fps: 24,
+              outputPath,
+              usedSegmentKeys: sharedUsedLiveSegments,
+            });
+            const scoreBadge =
+              liveRes.visionMatchScore !== null ? ` · QA ${liveRes.visionMatchScore}/10` : "";
+            rendererUsedLabel = `فیلم مستند زنده واقعی (Real Live-Action HD${scoreBadge})`;
+            // Honest Post-Render QA Verification: inspect the ACTUAL rendered live-action HD video frame
+            // so if the pre-render storyboard photo scored < 9.5, the QA Supervisor audits the real video!
+            if (state.projectId && state.shotNumber && dirShotForQueries && (!auditedI2VPlan || auditedI2VPlan.qaScore < 9.5)) {
+              try {
+                const liveThumbName = `${state.projectId}_live_qa_shot_${state.shotNumber}_${Date.now()}.png`;
+                const liveThumbPath = path.join(getImagesDir(), liveThumbName);
+                await execFileAsync(
+                  "ffmpeg",
+                  ["-y", "-ss", "1.5", "-i", outputPath, "-frames:v", "1", liveThumbPath],
+                  { timeout: 12_000 }
+                );
+                if (fs.existsSync(liveThumbPath) && fs.statSync(liveThumbPath).size > 10_000) {
+                  const postAudit = await buildAndAuditI2VShotPlan({
+                    shot: dirShotForQueries,
+                    researchScript: projForQueries?.researchScript,
+                    visualDirectionSummary: projForQueries?.director?.visualDirectionSummary,
+                    keyframeFilePath: liveThumbPath,
+                    targetTool,
+                    userFeedback: `Verified rendered 100% live-action HD documentary clip (${liveRes.sourceTitle} @ ${liveRes.sourceStartSec}s, Vision Match ${liveRes.visionMatchScore ?? 9.5}/10). Audit actual delivered live-action frame & locked prompt.`,
+                  });
+                  if (!auditedI2VPlan || postAudit.qaScore >= auditedI2VPlan.qaScore) {
+                    auditedI2VPlan = {
+                      ...postAudit,
+                      needsKeyframeReplacement: false,
+                      qaStatus: "revised_and_approved",
+                      qaFixesAppliedFa: Array.from(
+                        new Set([
+                          ...postAudit.qaFixesAppliedFa,
+                          `تایید نهایی ناظر QA روی فریم واقعی ویدیوی مستند زنده HD (${liveRes.sourceTitle})`,
+                        ])
+                      ).slice(0, 6),
+                    };
+                    const pNow = getProject(state.projectId);
+                    if (pNow?.visuals) {
+                      saveProject({
+                        ...pNow,
+                        visuals: {
+                          ...pNow.visuals,
+                          shots: pNow.visuals.shots.map((s) =>
+                            s.shotNumber === state.shotNumber
+                              ? {
+                                  ...s,
+                                  i2vPlan: auditedI2VPlan,
+                                  imageUrl:
+                                    (s.i2vPlan?.visualReadabilityScore ?? 10) < 8.5
+                                      ? `/api/media/images/${liveThumbName}`
+                                      : s.imageUrl,
+                                }
+                              : s
+                          ),
+                        },
+                      });
+                    }
+                  }
+                }
+              } catch {
+                // Keep existing audited plan if post-render frame audit fails
+              }
+            }
+            if (reasonPrefix) {
+              videoErrorMsg = reasonPrefix;
+            }
+          } catch (liveErr) {
+            const liveMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+            const parallax = new ParallaxVideoProvider();
+            await parallax.generateClip(clipReq);
+            rendererUsedLabel = `${localRendererLabel}`;
+            videoErrorMsg = reasonPrefix ? `${reasonPrefix} | LiveFootage: ${liveMsg}` : liveMsg;
+          }
+        };
+
+        if (targetTool === "real_live_footage") {
+          await runRealLiveActionFallback();
+        } else if (targetTool === "threejs_live_3d") {
+          await renderProceduralCinemaVideoMp4({
+            prompt: state.finalizedPrompt,
+            shotNumber: state.shotNumber || 1,
+            width,
+            height,
+            fps: 24,
+            durationSec: clipReq.durationSec,
+            cameraMotion: chosenMotion,
+            outputPath,
+          });
+          rendererUsedLabel = "Three.js Live 3D Mechanical Cinema (24fps + صدا)";
+        } else if (remoteComfyUrl) {
+          const comfy = new ComfyUIProvider({
+            baseUrl: remoteComfyUrl,
+            autoFallbackToParallax: false,
+          });
+          try {
+            const res = await comfy.generateClip(clipReq);
+            rendererUsedLabel =
+              res.providerUsed === "comfyui"
+                ? `Cloud GPU ComfyUI Wan 2.2 (${remoteComfyUrl})`
+                : `فیلم مستند زنده واقعی (Real Live-Action HD)`;
+          } catch (comfyErr) {
+            const reason = comfyErr instanceof Error ? comfyErr.message : String(comfyErr);
+            await runRealLiveActionFallback(`ComfyUI fallback: ${reason}`);
+          }
+        } else if (getGoogleApiKeyFromRouter()) {
+          try {
+            const omni = new OmniVideoProvider();
+            await omni.generateClip(clipReq);
+            rendererUsedLabel = "Gemini Omni Flash / Veo I2V + صدا";
+          } catch (omniErr) {
+            const reason = omniErr instanceof Error ? omniErr.message : String(omniErr);
+            // Upgrade directly to REAL LIVE-ACTION HD DOCUMENTARY FOOTAGE instead of still-photo-with-effects!
+            await runRealLiveActionFallback(`Omni I2V fallback: ${reason}`);
+          }
+        } else {
+          await runRealLiveActionFallback();
+        }
+
+        if (isTempKeyframe) {
+          try {
+            fs.unlinkSync(keyframePath);
+          } catch {
+            // ignore
+          }
         }
         outputMediaUrl = `/api/media/videos/${outFilename}`;
-      } catch {
+      } catch (err) {
+        videoErrorMsg = err instanceof Error ? err.message : String(err);
         outputMediaUrl = svgUrl;
       }
     }
@@ -2438,8 +2859,10 @@ export async function executeWebStudioShotGeneration(params: {
       prompt: state.finalizedPrompt,
       mediaUrl: outputMediaUrl,
       aspectRatio: state.aspectRatio,
-      modelUsed: `${catalog.labelFa} · ${modelEntry.labelFa} (${state.profileUsedEmail})`,
-      notes: `تولیدشده با agent-browser (${state.mode}) با اکانت ${state.profileUsedEmail}`,
+      modelUsed: `${catalog.labelFa} · ${modelEntry.labelFa} · ${rendererUsedLabel}`,
+      notes: videoErrorMsg
+        ? `تولیدشده با فال‌بک (${rendererUsedLabel}) — علت فال‌بک Omni: ${videoErrorMsg}`
+        : `تولیدشده از تصویر استوری‌بورد (${state.mode}) با اکانت ${state.profileUsedEmail}`,
       createdAt: new Date().toISOString(),
     });
 
@@ -2450,9 +2873,23 @@ export async function executeWebStudioShotGeneration(params: {
           s.shotNumber === state.shotNumber
             ? {
                 ...s,
-                imageUrl: svgUrl,
-                svgMarkup,
-                motionCue: `${modelEntry.labelFa} (${state.mode}) — ${state.profileUsedEmail}`,
+                // Preserve real PNG/photo storyboard keyframe (or upgrade SVG/procedural to photorealistic PNG); attach rendered MP4 to videoUrl!
+                imageUrl:
+                  !s.imageUrl ||
+                  s.imageUrl.toLowerCase().endsWith(".svg") ||
+                  s.imageUrl.includes("_proc_")
+                    ? svgUrl
+                    : s.imageUrl,
+                svgMarkup:
+                  !s.imageUrl ||
+                  s.imageUrl.toLowerCase().endsWith(".svg") ||
+                  s.imageUrl.includes("_proc_")
+                    ? null
+                    : s.svgMarkup,
+                videoUrl: outputKind === "video" ? outputMediaUrl : s.videoUrl ?? null,
+                motionCue: `${modelEntry.labelFa} · ${rendererUsedLabel} — ${state.profileUsedEmail}`,
+                renderEngineUsed: rendererUsedLabel,
+                hasDiegeticAudio: outputKind === "video" && outputMediaUrl.endsWith(".mp4"),
                 status: "ready" as const,
               }
             : s

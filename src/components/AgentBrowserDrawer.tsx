@@ -83,6 +83,14 @@ const SITE_MODELS_MAP: Record<
     { id: "omni_flash", labelFa: "Gemini Omni Flash (ویدیو سریع)" },
     { id: "imagen_3", labelFa: "Google Imagen 3 (تصویر کلیدی دقیق)" },
   ],
+  molab: [
+    { id: "molab_wan22_gpu", labelFa: "Molab GPU · Wan 2.2 I2V 14B (FP8)" },
+    { id: "molab_ltx23_gpu", labelFa: "Molab GPU · LTX-Video 2.3 (سریع)" },
+  ],
+  google_colab: [
+    { id: "colab_wan22_gguf", labelFa: "Colab T4 GPU · Wan 2.2 5B (GGUF)" },
+    { id: "colab_ltx23_gpu", labelFa: "Colab GPU · LTX-Video (سریع)" },
+  ],
   leonardo_ai: [
     { id: "leonardo_phoenix", labelFa: "Leonardo Phoenix 1.0 (تصویر حرفه‌ای)" },
     { id: "leonardo_kino_xl", labelFa: "Leonardo Kino XL (سینمایی)" },
@@ -827,6 +835,12 @@ export const AgentBrowserDrawer: React.FC<AgentBrowserDrawerProps> = ({
                       }
                       className="w-full rounded-lg border border-[#2A3142] bg-[#0B0E14] px-2.5 py-2 text-xs text-white focus:border-amber-500 focus:outline-none"
                     >
+                      <option value="molab">
+                        Marimo Molab GPU (مولب — تا ۹۶GB VRAM)
+                      </option>
+                      <option value="google_colab">
+                        Google Colab GPU (گوگل کولب — T4 / L4)
+                      </option>
                       <option value="google_flow">
                         Google Flow / LabsFX (گوگل فلو)
                       </option>

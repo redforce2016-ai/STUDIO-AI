@@ -13,13 +13,24 @@ import {
 import type {
   ContentFormatOption,
   PageMaturityOption,
-  PageProfile,
   PipelineStage,
   PlatformOption,
   ProjectBrief,
   TopicAnalysisResponse,
   ViralTopicProposal,
 } from "../types/studio";
+
+export interface StudioPageProfileOption {
+  id: string;
+  name: string;
+  handle: string;
+  platform: PlatformOption;
+  niche: string;
+  voiceProfile?: {
+    speakerName: string;
+    voicePersona: string;
+  };
+}
 
 export interface ChatTimelineMessage {
   id: string;
@@ -30,8 +41,8 @@ export interface ChatTimelineMessage {
 }
 
 interface GuidedStudioChatProps {
-  pages: PageProfile[];
-  selectedPageId: string | null;
+  pages?: StudioPageProfileOption[];
+  selectedPageId?: string | null;
   activeStage: PipelineStage | null;
   hasActiveProject: boolean;
   isAnalyzing: boolean;
@@ -43,8 +54,8 @@ interface GuidedStudioChatProps {
   messages: ChatTimelineMessage[];
   pendingBrief: ProjectBrief | null;
   pendingAnalysis: TopicAnalysisResponse | null;
-  onSelectPageProfile: (page: PageProfile | null) => void;
-  onManagePages: () => void;
+  onSelectPageProfile?: (page: StudioPageProfileOption | null) => void;
+  onManagePages?: () => void;
   onChangePlatform: (p: PlatformOption) => void;
   onChangeFormat: (f: ContentFormatOption) => void;
   onChangePageMaturity: (m: PageMaturityOption) => void;
@@ -99,13 +110,11 @@ export const PAGE_MATURITY_OPTIONS: Array<{
 const STAGE_CHAT_HINT: Record<PipelineStage, string> = {
   input: "موضوع خام خود را بنویسید تا ایجنت سناریونویس ۳ زاویه بی‌نظیر پیشنهاد دهد...",
   research_script: "اصلاحی روی سناریو می‌خواهید؟ بنویسید (ایراد یادگرفته‌شده در حافظه ایجنت هم ثبت می‌شود)...",
-  narration: "تغییری در اعراب‌گذاری، مکث‌ها یا لحن متن گویندگی می‌خواهید؟ بنویسید...",
-  director: "تغییری در دکوپاژ شات‌های ۳ تا ۸ ثانیه یا زاویه دوربین می‌خواهید؟ بنویسید...",
-  shot_videos: "اگر نکته‌ای برای اصلاح ویدیوی شات‌ها دارید اینجا یا روی همان شات بنویسید...",
-  voiceover: "تغییری در حس بیان، ریتم یا صدای گوینده می‌خواهید؟ بنویسید...",
-  davinci: "پکیج تدوین DaVinci Resolve آماده است؛ اگر تغییری در مراحل قبل دارید بنویسید...",
-  visuals: "تغییری در سبک فریم‌های صحنه می‌خواهید؟ بنویسید...",
-  completed: "پست شما نهایی شد! برای شروع پست بعدی روی «پست جدید» در بالا کلیک کنید.",
+  storyboard: "تغییری در دکوپاژ شات‌ها، زاویه دوربین یا تصاویر استوری‌بورد می‌خواهید؟ بنویسید...",
+  video_shots: "اگر نکته‌ای برای اصلاح ویدیوی شات‌ها یا صحنه سه‌بعدی دارید اینجا یا روی همان شات بنویسید...",
+  voiceover: "تغییری در اعراب‌گذاری، حس بیان، ریتم یا صدای گوینده می‌خواهید؟ بنویسید...",
+  assembly: "تغییری در تدوین، زیرنویس یا رندر نهایی می‌خواهید؟ بنویسید...",
+  completed: "پست شما نهایی شد! برای شروع پست بعدی روی «شروع ایده جدید» در بالا کلیک کنید.",
 };
 
 function readBlobAsBase64(blob: Blob): Promise<{ base64: string; mimeType: string }> {
@@ -122,7 +131,7 @@ function readBlobAsBase64(blob: Blob): Promise<{ base64: string; mimeType: strin
   });
 }
 
-function getStarterPromptsForPage(page: PageProfile | null): string[] {
+function getStarterPromptsForPage(page: StudioPageProfileOption | null): string[] {
   if (!page) {
     return [
       "تفاوت لوله مانیسمان رده ۴۰ و رده ۸۰ و نحوه تشخیص بار اصلی از درزدار در پروژه‌های صنعتی",
@@ -154,8 +163,8 @@ function getStarterPromptsForPage(page: PageProfile | null): string[] {
 }
 
 export function GuidedStudioChat({
-  pages,
-  selectedPageId,
+  pages = [],
+  selectedPageId = null,
   activeStage,
   hasActiveProject,
   isAnalyzing,
@@ -164,7 +173,7 @@ export function GuidedStudioChat({
   platform,
   contentFormat,
   pageMaturity,
-  messages,
+  messages = [],
   pendingBrief,
   pendingAnalysis,
   onSelectPageProfile,
@@ -185,7 +194,9 @@ export function GuidedStudioChat({
   const chunksRef = useRef<Blob[]>([]);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const selectedPage = pages.find((p) => p.id === selectedPageId) ?? null;
+  const safePages = Array.isArray(pages) ? pages : [];
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  const selectedPage = safePages.find((p) => p.id === selectedPageId) ?? null;
   const starterPrompts = getStarterPromptsForPage(selectedPage);
 
   useEffect(() => {
@@ -195,10 +206,10 @@ export function GuidedStudioChat({
   }, [initialDraftIdea]);
 
   useEffect(() => {
-    if (messages.length > 1 && chatContainerRef.current) {
+    if (safeMessages.length > 1 && chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
-  }, [messages.length, isAnalyzing, isRunningPipeline]);
+  }, [safeMessages.length, isAnalyzing, isRunningPipeline]);
 
   const platformKey =
     platform === "reels"
@@ -290,73 +301,77 @@ export function GuidedStudioChat({
         <Sparkles className="h-4 w-4 shrink-0 text-amber-400" />
       </div>
 
-      {/* Active Page Profile Selector Bar */}
-      <div className="shrink-0 border-b border-[#262B38] bg-[#0B0D11]/60 px-4 py-3">
-        <div className="flex items-center justify-between gap-2">
-          <label
-            htmlFor="studio-page-select"
-            className="text-[11px] font-semibold text-slate-300 whitespace-nowrap"
-          >
-            پروفایل پیج فعال:
-          </label>
-          <button
-            type="button"
-            onClick={onManagePages}
-            className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400 hover:text-amber-300 whitespace-nowrap shrink-0"
-          >
-            <FolderKanban className="h-3.5 w-3.5" />
-            <span>مدیریت پروفایل‌ها و کلون صدا</span>
-          </button>
-        </div>
-
-        <select
-          id="studio-page-select"
-          disabled={busy || hasActiveProject}
-          value={selectedPageId || ""}
-          onChange={(e) => {
-            const val = e.target.value;
-            const found = pages.find((p) => p.id === val) ?? null;
-            onSelectPageProfile(found);
-          }}
-          className="mt-1.5 w-full rounded-xl border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500 disabled:opacity-60"
-        >
-          <option value="">بدون پروفایل پیج (ورود دستی تنظیمات)</option>
-          {pages.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name} ({p.handle}) — {p.platform === "youtube" ? "یوتیوب" : p.platform === "tiktok" ? "تیک‌تاک" : "اینستاگرام"}
-            </option>
-          ))}
-        </select>
-
-        {selectedPage && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
-            <span className="text-slate-200">{selectedPage.niche}</span>
-            <span aria-hidden="true">·</span>
-            <span className="text-emerald-400">
-              صدا: {selectedPage.voiceProfile.speakerName} ({selectedPage.voiceProfile.voicePersona})
-            </span>
+      {/* Active Page Profile Selector Bar (shown only when page profiles are configured) */}
+      {(safePages.length > 0 || Boolean(onManagePages)) && (
+        <div className="shrink-0 border-b border-[#262B38] bg-[#0B0D11]/60 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <label
+              htmlFor="studio-page-select"
+              className="text-[11px] font-semibold text-slate-300 whitespace-nowrap"
+            >
+              پروفایل پیج فعال:
+            </label>
+            {onManagePages && (
+              <button
+                type="button"
+                onClick={onManagePages}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400 hover:text-amber-300 whitespace-nowrap shrink-0"
+              >
+                <FolderKanban className="h-3.5 w-3.5" />
+                <span>مدیریت پروفایل‌ها و کلون صدا</span>
+              </button>
+            )}
           </div>
-        )}
-      </div>
+
+          <select
+            id="studio-page-select"
+            disabled={busy || hasActiveProject}
+            value={selectedPageId || ""}
+            onChange={(e) => {
+              const val = e.target.value;
+              const found = safePages.find((p) => p.id === val) ?? null;
+              onSelectPageProfile?.(found);
+            }}
+            className="mt-1.5 w-full rounded-xl border border-[#262B38] bg-[#14171F] px-3 py-2 text-xs text-slate-100 outline-none focus:border-amber-500 disabled:opacity-60"
+          >
+            <option value="">بدون پروفایل پیج (ورود دستی تنظیمات)</option>
+            {safePages.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.handle}) — {p.platform === "youtube" ? "یوتیوب" : p.platform === "tiktok" ? "تیک‌تاک" : "اینستاگرام"}
+              </option>
+            ))}
+          </select>
+
+          {selectedPage && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400">
+              <span className="text-slate-200">{selectedPage.niche}</span>
+              {selectedPage.voiceProfile && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-emerald-400">
+                    صدا: {selectedPage.voiceProfile.speakerName} ({selectedPage.voiceProfile.voicePersona})
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Chat Messages Area (Fixed-height internal scroll) */}
       <div
         ref={chatContainerRef}
         className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5"
       >
-        {messages.length === 0 ? (
+        {safeMessages.length === 0 ? (
           <div className="space-y-4 rounded-xl border border-[#262B38] bg-[#0B0D11]/70 p-4 text-xs leading-7 text-slate-300">
             <p className="font-semibold text-amber-400">
-              پروفایل پیج شما بارگذاری شد؛ فقط موضوع خام امروز را بنویسید.
+              استودیوی تولید ویدیو آماده است؛ موضوع خام امروز را بنویسید.
             </p>
             <p>
-              نیازی نیست هر بار مخاطب هدف، لحن یا قوانین الگوریتم را توضیح دهید.{" "}
-              <span className="font-semibold text-slate-100">ایجنت سناریونویس</span> با حافظه اختصاصی
-              همین پیج، ۳ زاویه وایرال پیشنهادی می‌سازد و پس از انتخاب شما، سناریوی کامل، متن
-              اعراب‌گذاری‌شده گویندگی، شات‌های ۳ تا ۸ ثانیه (با ۲ فریم)، ویدیوی تک‌تک شات‌ها و پروژه
-              آماده{" "}
-              <span className="font-semibold text-slate-100">DaVinci Resolve رایگان</span> را تحویل
-              می‌دهد.
+              <span className="font-semibold text-slate-100">ایجنت سناریونویس</span> پس از تحلیل موضوع
+              و پژوهش وب، ۳ زاویه وایرال پیشنهادی می‌سازد و پس از انتخاب شما، سناریوی کامل، استوری‌بورد،
+              ویدیوی تک‌تک شات‌ها، صدای گوینده و تدوین نهایی MP4 را مرحله‌به‌مرحله تحویل می‌دهد.
             </p>
             <div className="space-y-1.5 border-t border-[#262B38] pt-3">
               <div className="text-[11px] text-slate-400">
@@ -375,7 +390,7 @@ export function GuidedStudioChat({
             </div>
           </div>
         ) : (
-          messages.map((msg) => (
+          safeMessages.map((msg) => (
             <div
               key={msg.id}
               className={`flex flex-col ${msg.role === "user" ? "items-start" : "items-end"}`}
@@ -393,7 +408,7 @@ export function GuidedStudioChat({
                 <p className="whitespace-pre-wrap">{msg.text}</p>
 
                 {/* 3 Viral Topic Proposals inside Assistant Message */}
-                {msg.analysis && msg.analysis.proposals.length > 0 && (
+                {msg.analysis && Array.isArray(msg.analysis.proposals) && msg.analysis.proposals.length > 0 && (
                   <div className="mt-4 space-y-3 border-t border-[#262B38] pt-3">
                     <div className="text-[11px] font-semibold text-amber-400">
                       ۳ گزینه برتر پیشنهادی (بررسی کامل جزئیات در بوم سمت چپ):
@@ -418,9 +433,9 @@ export function GuidedStudioChat({
                           {idx + 1}. {prop.title}
                         </div>
 
-                        {prop.contentValueScoreNote && (
+                        {prop.viralPotentialNote && (
                           <div className="text-[11px] text-emerald-300">
-                            ارزش محتوا: {prop.contentValueScoreNote}
+                            پتانسیل وایرال: {prop.viralPotentialNote}
                           </div>
                         )}
 
@@ -575,7 +590,7 @@ export function GuidedStudioChat({
             placeholder={
               isTranscribing
                 ? "در حال تبدیل صدای شما به متن..."
-                : STAGE_CHAT_HINT[activeStage || "input"]
+                : STAGE_CHAT_HINT[activeStage || "input"] || STAGE_CHAT_HINT.input
             }
             className="flex-1 resize-none rounded-xl border border-[#262B38] bg-[#14171F] px-3.5 py-2.5 text-xs leading-6 text-slate-100 placeholder:text-slate-500 focus:border-amber-500 focus:outline-none"
           />

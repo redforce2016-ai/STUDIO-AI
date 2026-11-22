@@ -4,6 +4,7 @@ import {
   Cloud,
   Download,
   FileText,
+  Film,
   FolderOpen,
   LogIn,
   LogOut,
@@ -11,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { ProjectRecord } from "../types/studio";
+import { downloadFileReliably } from "../lib/downloadFile";
 import { WindowsBundleView } from "./WindowsBundleView";
 
 interface ProjectsAndDesktopViewProps {
@@ -58,6 +60,24 @@ export function ProjectsAndDesktopView({
 }: ProjectsAndDesktopViewProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [showDesktopSource, setShowDesktopSource] = useState(false);
+  const [downloadingProjId, setDownloadingProjId] = useState<string | null>(null);
+  const [downloadPct, setDownloadPct] = useState<number>(0);
+
+  const handleDownloadFinalReel = async (proj: ProjectRecord) => {
+    setDownloadingProjId(proj.id);
+    setDownloadPct(1);
+    try {
+      await downloadFileReliably({
+        url: `/api/projects/${proj.id}/video/download`,
+        filename: `${proj.id}_reel_1080p.mp4`,
+        mimeType: "video/mp4",
+        onProgress: (pct) => setDownloadPct(pct),
+      });
+    } finally {
+      setDownloadingProjId(null);
+      setDownloadPct(0);
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -195,13 +215,31 @@ export function ProjectsAndDesktopView({
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[#262B38] pt-3">
-                    <button
-                      type="button"
-                      onClick={() => onOpenProject(proj)}
-                      className="rounded-lg bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-amber-400"
-                    >
-                      باز کردن در میز کار
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onOpenProject(proj)}
+                        className="rounded-lg bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-amber-400 cursor-pointer"
+                      >
+                        باز کردن در میز کار
+                      </button>
+
+                      {proj.videoProduction?.finalVideoUrl && (
+                        <button
+                          type="button"
+                          disabled={downloadingProjId !== null}
+                          onClick={() => handleDownloadFinalReel(proj)}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 cursor-pointer"
+                        >
+                          <Film className="h-3.5 w-3.5" />
+                          <span>
+                            {downloadingProjId === proj.id
+                              ? `دانلود (${downloadPct}%)...`
+                              : "دانلود ریلز MP4"}
+                          </span>
+                        </button>
+                      )}
+                    </div>
 
                     <div className="flex items-center gap-2">
                       <button

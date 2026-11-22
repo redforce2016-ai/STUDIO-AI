@@ -412,6 +412,22 @@ export function extractJsonCandidate(rawText: string): unknown {
   }
 }
 
+function stripNulls(val: unknown): unknown {
+  if (val === null || val === undefined) return undefined;
+  if (Array.isArray(val)) return val.map(stripNulls).filter((v) => v !== undefined);
+  if (typeof val === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      const cleaned = stripNulls(v);
+      if (cleaned !== undefined) {
+        out[k] = cleaned;
+      }
+    }
+    return out;
+  }
+  return val;
+}
+
 export async function parseWithZodRetry<T>(
   schema: z.ZodType<T>,
   produceText: (attempt: number, lastError: string | null) => Promise<string>,
@@ -421,7 +437,7 @@ export async function parseWithZodRetry<T>(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const raw = await produceText(attempt, lastError);
-      const parsedJson = extractJsonCandidate(raw);
+      const parsedJson = stripNulls(extractJsonCandidate(raw));
       const validated = schema.safeParse(parsedJson);
       if (validated.success) {
         return validated.data;

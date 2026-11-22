@@ -1,6 +1,22 @@
 export type VideoAspectFormat = "9:16" | "16:9";
 export type VideoQualityMode = "preview_480p" | "final_1080p";
-export type ShotToolKind = "remotion" | "blender" | "generative_api";
+export type CinemaLookPreset =
+  | "industrial_teal_amber"
+  | "kodak_2383_film"
+  | "documentary_clean"
+  | "none";
+export type KineticSubtitleStylePreset =
+  | "cinema_gold"
+  | "industrial_steel_blue"
+  | "viral_karaoke";
+export type ShotToolKind =
+  | "hyperframes"
+  | "remotion"
+  | "blender"
+  | "comfyui"
+  | "parallax"
+  | "generative_api"
+  | "omni_flash";
 export type CameraMotionKind = "static" | "push-in" | "pan" | "orbit";
 export type TransitionKind = "cut" | "crossfade" | "slide" | "zoom" | "wipe";
 export type PalettePresetKind =
@@ -86,6 +102,7 @@ export interface ShotSpec {
     animation_notes: string;
     blender_prompt?: string;
     generative_prompt?: string;
+    keyframe_path?: string;
   };
   style: {
     palette: [string, string, string];
@@ -104,6 +121,16 @@ export interface ShotSpec {
   };
   transition_in: TransitionKind;
   qa_checks: string[];
+  seven_layer_spec?: {
+    scene: string;
+    objects: string;
+    animation: string;
+    camera: string;
+    lighting: string;
+    transition: string;
+    soundDesign: string;
+    typographyNoteFa?: string;
+  };
   needs_clarification?: boolean;
   clarification_reason?: string | null;
 }
@@ -213,6 +240,11 @@ export interface ShotExecutionRecord {
   cacheHit: boolean;
   renderPath?: string | null;
   renderUrl?: string | null;
+  depthMapUrl?: string | null;
+  renderDurationMs?: number;
+  vramUsedMb?: number;
+  ramUsedMb?: number;
+  subClipsCount?: number;
   frameUrls: string[];
   deterministicCheck?: DeterministicVideoCheck | null;
   criticReport?: VisualCriticReport | null;
@@ -258,6 +290,9 @@ export interface VideoPipelineRun {
   updatedAt: string;
   aspectRatio: VideoAspectFormat;
   qualityMode: VideoQualityMode;
+  colorGradePreset?: CinemaLookPreset;
+  subtitleStylePreset?: KineticSubtitleStylePreset;
+  musicSource?: "lyria" | "ambient_cinema" | "none";
   status:
     | "idle"
     | "running"
@@ -272,6 +307,10 @@ export interface VideoPipelineRun {
   finalVideoUrl?: string | null;
   srtPath?: string | null;
   srtUrl?: string | null;
+  assSubtitleUrl?: string | null;
+  cubeLutUrl?: string | null;
+  otioUrl?: string | null;
+  afterEffectsJsxUrl?: string | null;
   reportUrl?: string | null;
   finalQa?: FinalQaReport | null;
   errorMessage?: string | null;
@@ -289,6 +328,13 @@ export interface VideoPreflightStatus {
   blenderAvailable: boolean;
   localFontsAvailable: boolean;
   geminiKeyConfigured: boolean;
+  gpuModel?: string;
+  vramTotalGb?: number;
+  ramTotalGb?: number;
+  hardwareProfile?: string;
+  defaultKeyframeProvider?: "comfyui" | "parallax";
+  comfyuiAvailable?: boolean;
+  parallaxAvailable?: boolean;
   missingCritical: string[];
   warnings: string[];
 }

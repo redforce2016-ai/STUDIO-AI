@@ -2,22 +2,29 @@ import { useState } from "react";
 import {
   ArrowLeft,
   Box,
+  CheckCircle2,
+  Cloud,
   Film,
   Globe,
   Loader2,
+  Play,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Wand2,
 } from "lucide-react";
 import type {
+  AgentBrowserCommandType,
   AgentBrowserState,
   DirectorShot,
+  I2VTargetTool,
   ProjectRecord,
   VisualAssetsOutput,
   WebStudioGenerationMode,
   WebStudioModelOption,
   WebStudioSiteId,
 } from "../types/studio";
+import { CloudGpuNotebookPanel } from "./CloudGpuNotebookPanel";
 import { ThreeSceneView } from "./ThreeSceneView";
 
 interface StageVideoShotsProps {
@@ -42,7 +49,27 @@ interface StageVideoShotsProps {
     modelId: WebStudioModelOption;
     aspectRatio: "9:16" | "16:9" | "1:1";
     resolution: "720p" | "1080p";
+    targetTool?: I2VTargetTool;
   }) => Promise<void>;
+  onPrepareShotI2V?: (
+    shotNumber: number,
+    targetTool: I2VTargetTool,
+    feedback?: string
+  ) => Promise<void>;
+  onPrepareAllI2V?: (targetTool: I2VTargetTool) => Promise<void>;
+  onRenderAllShotVideos?: (params: {
+    siteId: WebStudioSiteId;
+    modelId: WebStudioModelOption;
+    aspectRatio: "9:16" | "16:9" | "1:1";
+    resolution: "720p" | "1080p";
+    targetTool?: I2VTargetTool;
+  }) => Promise<void>;
+  onSwitchBrowserProfile: (profileId: string) => Promise<void>;
+  onDispatchBrowserCommand: (
+    command: AgentBrowserCommandType,
+    target: string,
+    agentName?: string
+  ) => Promise<void>;
   onOpenBrowserDrawer: () => void;
   onRegenerateAll: (feedback: string) => Promise<void>;
   onApprove: () => Promise<void>;
@@ -52,6 +79,14 @@ const SITE_MODELS_MAP: Record<
   WebStudioSiteId,
   Array<{ id: WebStudioModelOption; labelFa: string }>
 > = {
+  molab: [
+    { id: "molab_wan22_gpu", labelFa: "Molab GPU · Wan 2.2 I2V 14B (FP8)" },
+    { id: "molab_ltx23_gpu", labelFa: "Molab GPU · LTX-Video 2.3 (سریع)" },
+  ],
+  google_colab: [
+    { id: "colab_wan22_gguf", labelFa: "Colab T4 GPU · Wan 2.2 5B (GGUF)" },
+    { id: "colab_ltx23_gpu", labelFa: "Colab GPU · LTX-Video (سریع)" },
+  ],
   google_flow: [
     { id: "veo_2", labelFa: "Google Veo 2 (ویدیو سینمایی)" },
     { id: "omni_flash", labelFa: "Gemini Omni Flash (ویدیو سریع)" },
@@ -77,6 +112,11 @@ export function StageVideoShots({
   isCurrentGate,
   onRegenerateShot,
   onGenerateWebStudioShot,
+  onPrepareShotI2V,
+  onPrepareAllI2V,
+  onRenderAllShotVideos,
+  onSwitchBrowserProfile,
+  onDispatchBrowserCommand,
   onOpenBrowserDrawer,
   onRegenerateAll,
   onApprove,
@@ -87,17 +127,21 @@ export function StageVideoShots({
       ? "16:9"
       : "9:16";
 
-  const [subTab, setSubTab] = useState<"shots" | "three3d">("shots");
-  const [siteId, setSiteId] = useState<WebStudioSiteId>(
-    browserState?.siteConfig.siteId || "google_flow"
-  );
+  const [subTab, setSubTab] = useState<"shots" | "cloud_gpu" | "three3d">("shots");
+  const initialSite = browserState?.siteConfig.siteId || "google_flow";
+  const [siteId, setSiteId] = useState<WebStudioSiteId>(initialSite);
+  const [targetTool, setTargetTool] = useState<I2VTargetTool>("auto_best");
   const [mode, setMode] = useState<WebStudioGenerationMode>("image_to_video");
-  const [modelId, setModelId] = useState<WebStudioModelOption>("veo_2");
+  const [modelId, setModelId] = useState<WebStudioModelOption>(
+    initialSite === "google_flow"
+      ? "omni_flash"
+      : SITE_MODELS_MAP[initialSite]?.[0]?.id || "omni_flash"
+  );
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9" | "1:1">(
     defaultAspect
   );
   const [busyShotNum, setBusyShotNum] = useState<number | null>(null);
-  const [busyMode, setBusyMode] = useState<"web" | "local" | null>(null);
+  const [busyMode, setBusyMode] = useState<"web" | "local" | "qa" | "batch_qa" | "batch" | null>(null);
   const [shotPrompts, setShotPrompts] = useState<Record<number, string>>({});
   const [globalFeedback, setGlobalFeedback] = useState("");
 
@@ -108,6 +152,10 @@ export function StageVideoShots({
 
   const handleSiteChange = (nextSite: WebStudioSiteId) => {
     setSiteId(nextSite);
+    if (nextSite === "google_flow") {
+      setModelId("omni_flash");
+      return;
+    }
     const firstModel = SITE_MODELS_MAP[nextSite]?.[0]?.id;
     if (firstModel) setModelId(firstModel);
   };
@@ -129,7 +177,20 @@ export function StageVideoShots({
         modelId,
         aspectRatio,
         resolution: "1080p",
+        targetTool,
       });
+    } finally {
+      setBusyShotNum(null);
+      setBusyMode(null);
+    }
+  };
+
+  const handlePrepareShotQA = async (shot: DirectorShot) => {
+    if (!onPrepareShotI2V) return;
+    setBusyShotNum(shot.shotNumber);
+    setBusyMode("qa");
+    try {
+      await onPrepareShotI2V(shot.shotNumber, targetTool);
     } finally {
       setBusyShotNum(null);
       setBusyMode(null);
@@ -187,6 +248,18 @@ export function StageVideoShots({
             </button>
             <button
               type="button"
+              onClick={() => setSubTab("cloud_gpu")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors whitespace-nowrap shrink-0 ${
+                subTab === "cloud_gpu"
+                  ? "bg-amber-500 text-slate-950 font-semibold"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              <Cloud className="h-3.5 w-3.5" />
+              <span>سرور GPU ابری (Molab / Colab)</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setSubTab("three3d")}
               className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors whitespace-nowrap shrink-0 ${
                 subTab === "three3d"
@@ -201,7 +274,15 @@ export function StageVideoShots({
         </div>
       </div>
 
-      {subTab === "three3d" ? (
+      {subTab === "cloud_gpu" ? (
+        <CloudGpuNotebookPanel
+          browserState={browserState}
+          isExecutingBrowserCmd={isExecutingBrowserCmd}
+          onSwitchProfile={onSwitchBrowserProfile}
+          onDispatchBrowserCommand={onDispatchBrowserCommand}
+          onOpenBrowserDrawer={onOpenBrowserDrawer}
+        />
+      ) : subTab === "three3d" ? (
         <div className="space-y-3">
           <div className="rounded-xl border border-[#262B38] bg-[#14171F] px-4 py-3 text-xs text-slate-300">
             استودیوی سه‌بعدی مستقیماً به دکوپاژ همین پروژه متصل است تا نورپردازی و زوایای دوربین هر شات را قبل از رندر نهایی بررسی و تنظیم کنید.
@@ -217,7 +298,7 @@ export function StageVideoShots({
                 <h3 className="text-xs font-bold text-amber-300 flex items-center gap-2">
                   <Wand2 className="h-4 w-4" />
                   <span>
-                    پیکربندی مرورگر ایجنت (vercel-labs/agent-browser) برای ساخت شات‌ها در وب‌سایت‌ها
+                    پیکربندی مرورگر ایجنت و سرور GPU ابری برای تبدیل تصاویر استوری‌بورد به ویدیو
                   </span>
                 </h3>
                 <p className="mt-0.5 text-[11px] text-slate-400">
@@ -228,23 +309,95 @@ export function StageVideoShots({
                   {activeProfile
                     ? ` · مصرف امروز: ${activeProfile.usedToday}/${activeProfile.dailyLimit}`
                     : ""}
-                  ) وارد سایت می‌شود و در صورت پر شدن سهمیه، بین ۱۰ جیمیل چرخش می‌کند.
+                  ) وارد سایت یا نوتبوک Molab/Colab می‌شود و تصویر استوری‌بورد را به کلیپ MP4 تبدیل می‌کند.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={onOpenBrowserDrawer}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 whitespace-nowrap shrink-0"
-              >
-                <Globe className="h-3.5 w-3.5" />
-                <span>مدیریت ۱۰ جیمیل و نمای مرورگر</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {onPrepareAllI2V && (
+                  <button
+                    type="button"
+                    disabled={isRunning || isExecutingBrowserCmd || busyMode === "batch_qa"}
+                    onClick={async () => {
+                      setBusyMode("batch_qa");
+                      try {
+                        await onPrepareAllI2V(targetTool);
+                      } finally {
+                        setBusyMode(null);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/50 bg-amber-500/15 px-3 py-1.5 text-xs font-bold text-amber-300 hover:bg-amber-500/25 disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    {busyMode === "batch_qa" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                    )}
+                    <span>مهندسی پرامپت I2V و بازبینی QA همه شات‌ها</span>
+                  </button>
+                )}
+                {onRenderAllShotVideos && (
+                  <button
+                    type="button"
+                    disabled={isRunning || isExecutingBrowserCmd || busyMode === "batch"}
+                    onClick={async () => {
+                      setBusyMode("batch");
+                      try {
+                        await onRenderAllShotVideos({
+                          siteId,
+                          modelId,
+                          aspectRatio,
+                          resolution: "720p",
+                          targetTool,
+                        });
+                      } finally {
+                        setBusyMode(null);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-emerald-400 disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    {busyMode === "batch" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
+                    <span>تبدیل همه شات‌ها به ویدیوی زنده ({directorShots.length})</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onOpenBrowserDrawer}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 whitespace-nowrap shrink-0"
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                  <span>مدیریت ۱۰ جیمیل و نمای مرورگر</span>
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="space-y-1">
+                <label className="block text-[11px] text-amber-300 font-semibold">
+                  موتور تبدیل تصویر به ویدیو (I2V Target):
+                </label>
+                <select
+                  value={targetTool}
+                  onChange={(e) => setTargetTool(e.target.value as I2VTargetTool)}
+                  className="w-full rounded-lg border border-amber-500/40 bg-[#0B0D11] px-3 py-2 text-xs font-semibold text-amber-200 focus:border-amber-500 focus:outline-none"
+                >
+                  <option value="auto_best">هوشمند (Omni/Veo ⟵ GPU ⟵ فیلم زنده HD)</option>
+                  <option value="real_live_footage">فیلم مستند زنده واقعی (Real Live-Action HD)</option>
+                  <option value="gemini_omni_veo">Google Gemini Omni / Veo I2V</option>
+                  <option value="google_flow_veo2">مرورگر · Google Flow (Veo 2)</option>
+                  <option value="leonardo_motion">مرورگر · Leonardo.ai Motion 2.0</option>
+                  <option value="comfyui_wan22">GPU ابری · ComfyUI Wan 2.2 I2V</option>
+                  <option value="remotion_hyperframe">ترکیب‌بندی Remotion / HyperFrames</option>
+                  <option value="threejs_live_3d">شبیه‌سازی سه‌بعدی زنده Three.js</option>
+                </select>
+              </div>
+
               <div className="space-y-1">
                 <label className="block text-[11px] text-slate-400">
-                  سایت تولید ویدیو / تصویر:
+                  سایت / سرور GPU تولید ویدیو:
                 </label>
                 <select
                   value={siteId}
@@ -253,6 +406,8 @@ export function StageVideoShots({
                   }
                   className="w-full rounded-lg border border-[#262B38] bg-[#0B0D11] px-3 py-2 text-xs text-slate-100 focus:border-amber-500 focus:outline-none"
                 >
+                  <option value="molab">Marimo Molab GPU (مولب — تا ۹۶GB VRAM)</option>
+                  <option value="google_colab">Google Colab GPU (گوگل کولب — T4 / L4)</option>
                   <option value="google_flow">Google Flow / LabsFX (گوگل فلو)</option>
                   <option value="leonardo_ai">Leonardo.ai Studio (لئوناردو)</option>
                   <option value="kling_web">Kling AI Web Studio</option>
@@ -369,14 +524,23 @@ export function StageVideoShots({
                   <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
                     {/* Visual Output / Video Clip Player or Keyframe Preview */}
                     <div className="lg:col-span-4 rounded-xl border border-[#262B38] bg-[#0B0D11] p-2">
-                      {latestWebJob?.outputMediaUrl &&
-                      latestWebJob.outputKind === "video" &&
-                      latestWebJob.outputMediaUrl.endsWith(".mp4") ? (
+                      {visualAsset?.videoUrl && visualAsset.videoUrl.endsWith(".mp4") ? (
                         <video
                           controls
                           loop
-                          muted
                           playsInline
+                          poster={visualAsset.imageUrl || undefined}
+                          src={visualAsset.videoUrl}
+                          className="w-full max-h-64 rounded-lg bg-black object-contain"
+                        />
+                      ) : latestWebJob?.outputMediaUrl &&
+                        latestWebJob.outputKind === "video" &&
+                        latestWebJob.outputMediaUrl.endsWith(".mp4") ? (
+                        <video
+                          controls
+                          loop
+                          playsInline
+                          poster={visualAsset?.imageUrl || undefined}
                           src={latestWebJob.outputMediaUrl}
                           className="w-full max-h-64 rounded-lg bg-black object-contain"
                         />
@@ -395,6 +559,14 @@ export function StageVideoShots({
                       ) : (
                         <div className="flex h-44 items-center justify-center text-xs text-slate-500">
                           پیش‌نمایش شات آماده رندر
+                        </div>
+                      )}
+                      {visualAsset?.renderEngineUsed && (
+                        <div className="mt-1.5 flex items-center justify-between px-1 font-mono text-[10px] text-slate-400">
+                          <span>{visualAsset.renderEngineUsed}</span>
+                          {visualAsset.hasDiegeticAudio && (
+                            <span className="text-emerald-400">صدای صحنه ✓</span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -423,7 +595,52 @@ export function StageVideoShots({
                         />
                       </div>
 
-                      {latestWebJob && (
+                      {visualAsset?.i2vPlan && (
+                        <div className="rounded-xl border border-emerald-500/30 bg-[#0B0D11] p-3.5 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E2536] pb-2">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-400">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              <span>
+                                تاییدیه ناظر QA · امتیاز {visualAsset.i2vPlan.qaScore}/10
+                              </span>
+                            </span>
+                            <span className="font-mono text-[10px] text-slate-400">
+                              وضوح دوربین: {visualAsset.i2vPlan.visualReadabilityScore}/10 · حرکت زنده:{" "}
+                              {visualAsset.i2vPlan.liveActionRealismScore}/10 · سناریو:{" "}
+                              {visualAsset.i2vPlan.scenarioAlignmentScore}/10
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 text-[11px] leading-5">
+                            <div className="rounded-lg bg-[#14171F] p-2.5">
+                              <div className="font-semibold text-amber-300 mb-0.5">
+                                روانشناسی ویدیو و درک مخاطب:
+                              </div>
+                              <p className="text-slate-300">{visualAsset.i2vPlan.psychologyNoteFa}</p>
+                            </div>
+                            <div className="rounded-lg bg-[#14171F] p-2.5">
+                              <div className="font-semibold text-sky-300 mb-0.5">
+                                طراحی صحنه و حرکت فیزیکی زنده:
+                              </div>
+                              <p className="text-slate-300">{visualAsset.i2vPlan.setDesignNoteFa}</p>
+                            </div>
+                          </div>
+                          <div
+                            dir="ltr"
+                            className="rounded-lg border border-[#1E2536] bg-[#10131B] px-3 py-2 font-mono text-[11px] text-emerald-200/90 leading-5"
+                          >
+                            <span className="text-slate-400">QA-Locked I2V Prompt: </span>
+                            {visualAsset.i2vPlan.revisedPromptEn}
+                          </div>
+                          {visualAsset.i2vPlan.qaFixesAppliedFa.length > 0 && (
+                            <div className="text-[11px] text-slate-300">
+                              <span className="font-semibold text-emerald-400">اصلاحات ناظر QA: </span>
+                              {visualAsset.i2vPlan.qaFixesAppliedFa.join(" · ")}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {!visualAsset?.i2vPlan && latestWebJob && (
                         <div
                           dir="ltr"
                           className="rounded-lg border border-[#1E2536] bg-[#0B0D11] px-3 py-2 font-mono text-[11px] text-slate-300 line-clamp-2"
@@ -433,6 +650,22 @@ export function StageVideoShots({
                       )}
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
+                        {onPrepareShotI2V && (
+                          <button
+                            type="button"
+                            disabled={isThisBusy}
+                            onClick={() => void handlePrepareShotQA(shot)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:opacity-50 whitespace-nowrap shrink-0"
+                          >
+                            {busyShotNum === shot.shotNumber && busyMode === "qa" ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <ShieldCheck className="h-3.5 w-3.5" />
+                            )}
+                            <span>بازبینی ناظر QA و تولید پرامپت I2V</span>
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           disabled={isThisBusy || !currentPrompt.trim()}
@@ -446,7 +679,7 @@ export function StageVideoShots({
                             <Sparkles className="h-3.5 w-3.5" />
                           )}
                           <span>
-                            ساخت شات در مرورگر ایجنت ({siteId === "google_flow" ? "Google Flow" : siteId})
+                            تولید ویدیوی زنده شات (Image-to-Video)
                           </span>
                         </button>
 

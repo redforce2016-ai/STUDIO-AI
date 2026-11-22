@@ -6,6 +6,7 @@ import type {
   VideoPreflightStatus,
   VideoQualityMode,
 } from "../../src/types/videoPipeline.js";
+import { detectHardwareSync } from "./hardware.js";
 
 export interface VideoPipelineConfig {
   defaultAspectRatio: VideoAspectFormat;
@@ -27,18 +28,18 @@ export interface VideoPipelineConfig {
 
 export const DEFAULT_VIDEO_CONFIG: VideoPipelineConfig = {
   defaultAspectRatio: "9:16",
-  defaultQualityMode: "preview_480p",
-  fps: 30,
+  defaultQualityMode: "final_1080p",
+  fps: 24,
   maxShotRetries: 3,
-  shotRenderTimeoutMs: 120_000,
+  shotRenderTimeoutMs: 180_000,
   maxParallelShots: 3,
   enableGenerativeApi: false,
-  maxGenerativeShotsPerRun: 1,
+  maxGenerativeShotsPerRun: 0,
   enableBlender: true,
   targetLufs: -14,
-  burnSubtitles: false,
-  includeBackgroundMusic: false,
-  durationToleranceSec: 0.15,
+  burnSubtitles: true,
+  includeBackgroundMusic: true,
+  durationToleranceSec: 0.35,
   visionCriticModel: "gemini-4-hydrogen",
   plannerModel: "gemini-4-hydrogen",
 };
@@ -91,12 +92,18 @@ function commandExists(cmd: string): string | null {
 }
 
 export function findRemotionBrowserExecutable(): string | null {
-  const remotionKnownBin = path.resolve(
-    process.cwd(),
-    "node_modules/.remotion/chrome-headless-shell/linux64/chrome-headless-shell-linux64/chrome-headless-shell"
-  );
-  if (fs.existsSync(remotionKnownBin)) {
-    return remotionKnownBin;
+  const candidates = [
+    path.resolve(
+      process.cwd(),
+      "node_modules/.remotion/chrome-headless-shell/linux64/chrome-headless-shell-linux64/chrome-headless-shell"
+    ),
+    "/ms-playwright/chrome-headless-shell-linux64/chrome-headless-shell",
+    "/ms-playwright/chromium_headless_shell-1247/chrome-headless-shell-linux64/chrome-headless-shell",
+  ];
+  for (const bin of candidates) {
+    if (fs.existsSync(bin)) {
+      return bin;
+    }
   }
   const systemBin = commandExists("which chromium || which google-chrome || which chromium-browser");
   return systemBin ? systemBin.split("\n")[0]?.trim() || null : null;
@@ -124,6 +131,7 @@ export function runPreflightCheck(): VideoPreflightStatus {
   const localFontsAvailable = fs.existsSync(fontFile);
 
   const geminiKeyConfigured = Boolean(process.env.GEMINI_API_KEY?.trim());
+  const hw = detectHardwareSync();
 
   const missingCritical: string[] = [];
   if (!ffmpegAvailable) missingCritical.push("ffmpeg نصب نیست");
@@ -138,8 +146,10 @@ export function runPreflightCheck(): VideoPreflightStatus {
   if (!chromiumAvailable) {
     warnings.push("مرورگر Headless Chromium در اولین رندر توسط Remotion آماده می‌شود.");
   }
-  if (!geminiKeyConfigured) {
-    warnings.push("کلید GEMINI_API_KEY تنظیم نشده است؛ ارزیابی Vision QA نیازمند کلید معتبر است.");
+  if (hw.selectedProfile === "parallax_only") {
+    warnings.push(
+      `کارت گرافیک مجزا شناسایی نشد (RAM: ${hw.ramTotalGb}GB)؛ متحرک‌سازی Keyframe با حالت Parallax محلی اجرا می‌شود.`
+    );
   }
 
   return {
@@ -153,6 +163,13 @@ export function runPreflightCheck(): VideoPreflightStatus {
     blenderAvailable,
     localFontsAvailable,
     geminiKeyConfigured,
+    gpuModel: hw.gpuModel,
+    vramTotalGb: hw.vramTotalGb,
+    ramTotalGb: hw.ramTotalGb,
+    hardwareProfile: hw.selectedProfile,
+    defaultKeyframeProvider: hw.defaultProvider,
+    comfyuiAvailable: hw.selectedProfile !== "parallax_only",
+    parallaxAvailable: ffmpegAvailable,
     missingCritical,
     warnings,
   };

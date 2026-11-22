@@ -9,12 +9,16 @@ import {
   Maximize2,
   Plus,
   RefreshCw,
+  ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
 import type {
+  CinematicSevenLayerSpec,
   DirectorOutput,
   DirectorShot,
+  PreferredFreeEngine,
   VisualAssetShot,
   VisualAssetsOutput,
 } from "../types/studio";
@@ -68,6 +72,31 @@ export function StageStoryboard({
       0
     );
     setDraft({ ...draft, shots, totalEstimatedSeconds });
+  };
+
+  const updateShotSevenLayer = (
+    shotNumber: number,
+    layerKey: keyof CinematicSevenLayerSpec,
+    value: string
+  ) => {
+    const target = draft.shots.find((s) => s.shotNumber === shotNumber);
+    if (!target) return;
+    const baseSpec: CinematicSevenLayerSpec = target.sevenLayerSpec || {
+      scene: target.sceneDescriptionFa || "",
+      objects: "",
+      animation: "",
+      camera: `${target.cameraAngle} — ${target.cameraMovement}`,
+      lighting: target.lightingAndMood || "",
+      transition: "ترنزیشن نرم کنترل‌شده",
+      soundDesign: "آمبیانس سینمایی + افکت صوتی متناسب با حرکت",
+      typographyNoteFa: target.onScreenText || "",
+    };
+    updateShot(shotNumber, {
+      sevenLayerSpec: {
+        ...baseSpec,
+        [layerKey]: value,
+      },
+    });
   };
 
   const addShot = () => {
@@ -180,11 +209,11 @@ export function StageStoryboard({
         </div>
       </div>
 
-      {/* Visual Direction Summary */}
-      <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-5">
+      {/* Visual Direction Summary & Global 6-Point Production Blueprint */}
+      <div className="rounded-xl border border-[#262B38] bg-[#14171F] p-5 space-y-4">
         <div className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-400">
           <Clapperboard className="h-4 w-4 text-amber-400" />
-          <span>چشم‌انداز کارگردانی بصری و هویت استوری‌بورد</span>
+          <span>چشم‌انداز کارگردانی بصری و سند مرجع تولید (بدون حدس و توهم ایجنت‌ها)</span>
         </div>
         <textarea
           rows={2}
@@ -195,6 +224,47 @@ export function StageStoryboard({
           }
           className="w-full resize-none rounded-lg border border-[#262B38] bg-[#0B0D11] px-3.5 py-2.5 text-sm leading-7 text-slate-200 focus:border-amber-500 focus:outline-none"
         />
+
+        {draft.visualDirectionBlueprint && (
+          <div className="grid grid-cols-1 gap-3 border-t border-[#262B38] pt-4 text-xs sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-amber-400">پس‌زمینه و اتمسفر</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.backgroundAndAtmosphere}
+              </p>
+            </div>
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-amber-400">متریال و محصول واقع‌گرایانه</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.materialAndProductStyle}
+              </p>
+            </div>
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-sky-400">امضای نورپردازی و سایه</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.lightingSignature}
+              </p>
+            </div>
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-sky-400">زبان و حرکت دوربین</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.cameraLanguage}
+              </p>
+            </div>
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-emerald-400">ذرات معلق و افکت‌های ظریف</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.particlesAndEffects}
+              </p>
+            </div>
+            <div className="rounded-lg border border-[#262B38] bg-[#0B0D11] p-3">
+              <div className="text-[11px] font-semibold text-emerald-400">سیستم تایپوگرافی مدرن</div>
+              <p className="mt-1 leading-5 text-slate-300">
+                {draft.visualDirectionBlueprint.typographySystem}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Shot List with Paired Storyboard Keyframe Preview */}
@@ -442,6 +512,88 @@ export function StageStoryboard({
                       className="w-full resize-none rounded-lg border border-[#262B38] bg-[#0B0D11] px-3 py-2 text-xs leading-6 text-slate-200 focus:border-amber-500 focus:outline-none"
                     />
                   </div>
+
+                  {/* Mandatory 7-Layer Director Blueprint & Free Engine Selector */}
+                  <div className="md:col-span-2 rounded-lg border border-[#262B38] bg-[#0B0D11] p-3.5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#262B38] pb-2.5">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                        <SlidersHorizontal className="h-3.5 w-3.5" />
+                        <span>مشخصات قفل‌شده ۷ لایه کارگردانی (بدون حدس و توهم)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-slate-400">موتور رایگان رندر:</span>
+                        <select
+                          value={shot.preferredFreeEngine || "hyperframes"}
+                          disabled={isRunning}
+                          onChange={(e) =>
+                            updateShot(shot.shotNumber, {
+                              preferredFreeEngine: e.target.value as PreferredFreeEngine,
+                            })
+                          }
+                          className="rounded-md border border-[#262B38] bg-[#14171F] px-2.5 py-1 text-[11px] text-slate-100 focus:border-amber-500 focus:outline-none"
+                        >
+                          <option value="hyperframes">HyperFrames (موشن + ذرات + تایپوگرافی)</option>
+                          <option value="blender">Blender 3D (PBR + اسکلت سه‌بعدی)</option>
+                          <option value="remotion">Remotion v4 (نمودار / مقایسه کینتیک)</option>
+                          <option value="comfyui">ComfyUI Colab GPU (Wan 2.2 I2V)</option>
+                          <option value="ffmpeg_live">FFmpeg + فوتیج واقعی</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                      {(
+                        [
+                          ["scene", "۱. Scene (صحنه و پس‌زمینه)"],
+                          ["objects", "۲. Objects (اشیا، متریال، متن، لوگو)"],
+                          ["animation", "۳. Animation (حرکت اشیا و ذرات معلق)"],
+                          ["camera", "۴. Camera (زاویه، لنز و حرکت نرم دوربین)"],
+                          ["lighting", "۵. Lighting (نورپردازی سفید/آبی و سایه‌ها)"],
+                          ["transition", "۶. Transition (انتقال به صحنه بعد)"],
+                          ["soundDesign", "۷. Sound Design (موسیقی و افکت صوتی)"],
+                        ] as Array<[keyof CinematicSevenLayerSpec, string]>
+                      ).map(([layerKey, label]) => (
+                        <div
+                          key={layerKey}
+                          className={layerKey === "soundDesign" ? "sm:col-span-2" : ""}
+                        >
+                          <label className="mb-1 block text-[11px] text-slate-400">{label}</label>
+                          <input
+                            type="text"
+                            disabled={isRunning}
+                            value={shot.sevenLayerSpec?.[layerKey] || ""}
+                            onChange={(e) =>
+                              updateShotSevenLayer(shot.shotNumber, layerKey, e.target.value)
+                            }
+                            placeholder={`مشخصات دقیق ${label}...`}
+                            className="w-full rounded-md border border-[#262B38] bg-[#14171F] px-2.5 py-1.5 text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-amber-500 focus:outline-none"
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    {visualAsset?.qaSevenLayerAudit && (
+                      <div className="border-t border-[#262B38] pt-3 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                          <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-400">
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                            <span>
+                              ممیزی QA هفت‌لایه تصویر شات:{" "}
+                              {visualAsset.qaSevenLayerAudit.passed ? "تایید شد" : "نیازمند اصلاح"}
+                            </span>
+                          </span>
+                          <span className="font-mono text-slate-300 tabular-nums">
+                            نمره کل: {visualAsset.qaSevenLayerAudit.overallScore}/100 · فهم مخاطب:{" "}
+                            {visualAsset.qaSevenLayerAudit.userComprehensionScore}/100 · جذابیت:{" "}
+                            {visualAsset.qaSevenLayerAudit.visualAppealScore}/100
+                          </span>
+                        </div>
+                        <p className="text-[11px] leading-5 text-slate-400">
+                          {visualAsset.qaSevenLayerAudit.summaryFa}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -551,7 +703,9 @@ export function StageStoryboard({
               {lightboxShot.asset?.imageUrl && (
                 <a
                   href={lightboxShot.asset.imageUrl}
-                  download={`storyboard_shot_${lightboxShot.director.shotNumber}.svg`}
+                  download={`storyboard_shot_${lightboxShot.director.shotNumber}.${
+                    lightboxShot.asset.imageUrl.split(".").pop()?.split("?")[0] || "png"
+                  }`}
                   className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-xs font-semibold text-slate-950 hover:bg-amber-400"
                 >
                   <Download className="h-4 w-4" />

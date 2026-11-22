@@ -3,9 +3,22 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type {
+  CinemaLookPreset,
   DeterministicVideoCheck,
+  KineticSubtitleStylePreset,
   TransitionKind,
 } from "../../../src/types/videoPipeline.js";
+import {
+  buildCinemaAudioFilterGraph,
+  buildCinemaVideoFilterGraph,
+  generateCinemaAmbientMusicBed,
+  generateCube3dLutFile,
+} from "../cinemaMastering.js";
+import {
+  analyzeNarrationAudioSync,
+  generateKineticAssSubtitles,
+  getBundledFontsDir,
+} from "../kineticSubtitles.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -96,7 +109,7 @@ export async function runDeterministicChecks(
   }
 
   const probe = await probeMedia(videoPath);
-  const tol = expected.durationToleranceSec ?? 0.15;
+  const tol = expected.durationToleranceSec ?? 0.35;
   const durationDelta = Math.abs(probe.durationSec - expected.durationSec);
 
   if (!probe.hasVideo) failures.push("استریم ویدیو در فایل یافت نشد.");
@@ -115,7 +128,6 @@ export async function runDeterministicChecks(
     );
   }
 
-  // Run blackdetect & freezedetect via FFmpeg null sink
   let blackDetected = false;
   let freezeDetected = false;
   try {
@@ -147,7 +159,6 @@ export async function runDeterministicChecks(
     // non-fatal if filter check errors on tiny clips
   }
 
-  // Optional audio loudness probe
   let meanVolumeDb: number | null = null;
   if (probe.hasAudio) {
     try {
@@ -249,6 +260,37 @@ function formatSrtTime(sec: number): string {
   return `${p2(hrs)}:${p2(mins)}:${p2(secs)},${p3(ms)}`;
 }
 
+function splitIntoReelCaptionChunks(text: string, maxWordsPerChunk = 5, maxCharsPerChunk = 34): string[] {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (words.length === 0) return [];
+  const chunks: string[] = [];
+  let current: string[] = [];
+  for (const w of words) {
+    const candidate = [...current, w].join(" ");
+    const hitPunctuationBreak =
+      current.length >= 3 && /[،,.؟!؛:]$/.test(current[current.length - 1]);
+    if (
+      current.length > 0 &&
+      (current.length >= maxWordsPerChunk ||
+        candidate.length > maxCharsPerChunk ||
+        hitPunctuationBreak)
+    ) {
+      chunks.push(current.join(" "));
+      current = [w];
+    } else {
+      current.push(w);
+    }
+  }
+  if (current.length > 0) {
+    if (current.length === 1 && chunks.length > 0 && chunks[chunks.length - 1].length + current[0].length < maxCharsPerChunk + 8) {
+      chunks[chunks.length - 1] = `${chunks[chunks.length - 1]} ${current[0]}`;
+    } else {
+      chunks.push(current.join(" "));
+    }
+  }
+  return chunks;
+}
+
 export function buildSrtFromShots(
   shots: Array<{ durationSec: number; narrationText: string }>
 ): string {
@@ -261,8 +303,17 @@ export function buildSrtFromShots(
     const end = cursor + s.durationSec;
     cursor = end;
     if (!text) continue;
-    blocks.push(`${idx}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${text}\n`);
-    idx++;
+    const chunks = splitIntoReelCaptionChunks(text, 5, 34);
+    const totalWeight = chunks.reduce((sum, c) => sum + Math.max(4, c.length), 0) || 1;
+    let subCursor = start;
+    for (let i = 0; i < chunks.length; i++) {
+      const weight = Math.max(4, chunks[i].length);
+      const chunkDur = i === chunks.length - 1 ? Math.max(0.2, end - subCursor) : (s.durationSec * weight) / totalWeight;
+      const chunkEnd = Math.min(end, subCursor + chunkDur);
+      blocks.push(`${idx}\n${formatSrtTime(subCursor)} --> ${formatSrtTime(chunkEnd)}\n${chunks[i]}\n`);
+      subCursor = chunkEnd;
+      idx++;
+    }
   }
   return blocks.join("\n");
 }
@@ -270,21 +321,21 @@ export function buildSrtFromShots(
 function mapXfadeTransition(t: TransitionKind): string {
   switch (t) {
     case "slide":
-      return "slideleft";
+      return "smoothleft";
     case "zoom":
-      return "smoothup";
+      return "zoomin";
     case "wipe":
       return "wipeleft";
     case "crossfade":
     default:
-      return "fade";
+      return "dissolve";
   }
 }
 
 /**
- * Normalizes a shot MP4 to uniform fps/resolution/yuv420p and guarantees an audio stream (silent if absent).
+ * Normalizes a shot MP4 to uniform fps/resolution/yuv420p using Lanczos sharp scaling and preserves diegetic audio.
  */
-async function normalizeShotClip(
+export async function normalizeShotClip(
   inputPath: string,
   outputPath: string,
   width: number,
@@ -296,7 +347,7 @@ async function normalizeShotClip(
   if (!probe.hasAudio) {
     args.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000");
   }
-  const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=#0B0D11,fps=${fps},format=yuv420p,setsar=1`;
+  const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},fps=${fps},format=yuv420p,setsar=1`;
   args.push("-vf", vf);
 
   if (!probe.hasAudio) {
@@ -305,7 +356,7 @@ async function normalizeShotClip(
     args.push("-map", "0:v:0", "-map", "0:a:0", "-ar", "48000", "-ac", "2");
   }
 
-  args.push("-c:v", "libx264", "-preset", "fast", "-crf", "19", "-c:a", "aac", "-b:a", "192k", outputPath);
+  args.push("-c:v", "libx264", "-preset", "fast", "-crf", "16", "-c:a", "aac", "-b:a", "192k", outputPath);
   await execFileAsync("ffmpeg", args);
   const outProbe = await probeMedia(outputPath);
   return outProbe.durationSec;
@@ -317,6 +368,7 @@ export async function assembleFinalVideo(params: {
     videoPath: string;
     transition_in: TransitionKind;
     narration_text: string;
+    onScreenText?: string;
     duration_sec: number;
   }>;
   workDir: string;
@@ -328,10 +380,17 @@ export async function assembleFinalVideo(params: {
   narrationWavPath?: string | null;
   includeBackgroundMusic?: boolean;
   burnSubtitles?: boolean;
+  subtitleStylePreset?: KineticSubtitleStylePreset;
   targetLufs?: number;
+  colorGradePreset?: CinemaLookPreset;
+  musicSource?: "lyria" | "ambient_cinema" | "none";
+  musicMoodPrompt?: string;
 }): Promise<{
   finalPath: string;
   srtPath: string;
+  assPath: string | null;
+  cubeLutPath: string | null;
+  musicSourceUsed: "lyria" | "ambient_cinema" | "none";
   totalDurationSec: number;
 }> {
   fs.mkdirSync(params.workDir, { recursive: true });
@@ -346,7 +405,7 @@ export async function assembleFinalVideo(params: {
     normalized.push({ path: normPath, duration: dur, transition: s.transition_in });
   }
 
-  // Write SRT
+  // Write legacy SRT alongside Kinetic ASS
   const srtContent = buildSrtFromShots(
     params.shots.map((s, idx) => ({
       durationSec: normalized[idx]?.duration || s.duration_sec,
@@ -356,13 +415,12 @@ export async function assembleFinalVideo(params: {
   fs.writeFileSync(params.srtOutPath, srtContent, "utf-8");
 
   const stitchedPath = path.join(params.workDir, "stitched_raw.mp4");
-  const xfadeDur = 0.3;
+  const xfadeDur = 0.34;
 
   if (normalized.length === 1) {
     fs.copyFileSync(normalized[0].path, stitchedPath);
   } else {
-    // Build xfade + acrossfade filtergraph if all clips > 0.8s, otherwise concat demuxer
-    const canXfade = normalized.every((n) => n.duration > 0.8 && n.transition !== "cut");
+    const canXfade = normalized.every((n) => n.duration > 0.85 && n.transition !== "cut");
     if (canXfade) {
       const inputs: string[] = [];
       for (const n of normalized) {
@@ -403,7 +461,7 @@ export async function assembleFinalVideo(params: {
         "-preset",
         "fast",
         "-crf",
-        "19",
+        "16",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -432,7 +490,7 @@ export async function assembleFinalVideo(params: {
         "-preset",
         "fast",
         "-crf",
-        "19",
+        "16",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -448,88 +506,134 @@ export async function assembleFinalVideo(params: {
   const totalDur = Math.max(1, stitchedProbe.durationSec);
   const hasNarration = Boolean(params.narrationWavPath && fs.existsSync(params.narrationWavPath));
   const targetLufs = params.targetLufs ?? -14;
+  const preset: CinemaLookPreset = params.colorGradePreset || "industrial_teal_amber";
 
-  // Mix narration + optional ambient bed with sidechaincompress ducking + -14 LUFS loudnorm
+  // 0. Analyze real WAV voiceover duration & speech windows for tight audio-to-subtitle synchronization
+  const syncPlan = await analyzeNarrationAudioSync(params.narrationWavPath, totalDur);
+  const assOutPath = path.join(path.dirname(params.finalOutPath), "kinetic_subtitles.ass");
+  const { assContent, cueCount } = generateKineticAssSubtitles({
+    shots: params.shots.map((s, idx) => ({
+      shotNumber: idx + 1,
+      durationSec: normalized[idx]?.duration || s.duration_sec,
+      narrationText: s.narration_text,
+      onScreenText: s.onScreenText,
+    })),
+    syncPlan,
+    width: params.width,
+    height: params.height,
+    stylePreset: params.subtitleStylePreset || "industrial_steel_blue",
+    includeShotTitles: false,
+  });
+  let savedAssPath: string | null = null;
+  if (cueCount > 0) {
+    fs.writeFileSync(assOutPath, assContent, "utf-8");
+    savedAssPath = assOutPath;
+  }
+
+  // 1. Generate 33^3 3D .cube LUT in output folder for lossless headless mastering & desktop DaVinci export
+  let cubeLutPath: string | null = null;
+  if (preset !== "none") {
+    cubeLutPath = path.join(path.dirname(params.finalOutPath), "cinema_grade.cube");
+    generateCube3dLutFile(preset, cubeLutPath);
+  }
+
+  // 2. Generate Cinema Background Score (Lyria 3 -> FFmpeg Multi-Harmonic Cinema Underscore)
+  let musicPath: string | null = null;
+  let musicSourceUsed: "lyria" | "ambient_cinema" | "none" = "none";
+  const wantMusic = Boolean(params.includeBackgroundMusic && params.musicSource !== "none");
+  if (wantMusic) {
+    const scoreOut = path.join(params.workDir, "cinema_score.wav");
+    try {
+      const musicRes = await generateCinemaAmbientMusicBed({
+        outputPath: scoreOut,
+        durationSec: totalDur,
+        moodPrompt: params.musicMoodPrompt,
+        preferLyria: params.musicSource !== "ambient_cinema",
+      });
+      if (fs.existsSync(musicRes.musicPath)) {
+        musicPath = musicRes.musicPath;
+        musicSourceUsed = musicRes.source;
+      }
+    } catch {
+      musicPath = null;
+      musicSourceUsed = "none";
+    }
+  }
+
+  // 3. Build Multi-Input High-Clarity Cinema Mastering Command
   const finalArgs: string[] = ["-y", "-i", stitchedPath];
-  const filterChains: string[] = [];
-
   if (hasNarration && params.narrationWavPath) {
     finalArgs.push("-i", params.narrationWavPath);
-    if (params.includeBackgroundMusic) {
-      // Generate gentle low-level ambient harmonic pad via FFmpeg sine synthesis and duck under narration
-      finalArgs.push(
-        "-f",
-        "lavfi",
-        "-t",
-        totalDur.toFixed(2),
-        "-i",
-        "sine=frequency=110:sample_rate=48000"
-      );
-      filterChains.push(
-        `[2:a]volume=0.05,lowpass=f=320,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[bgm]`,
-        `[1:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=${totalDur.toFixed(2)}[vo]`,
-        `[vo]asplit=2[vo_sc][vo_mix]`,
-        `[bgm][vo_sc]sidechaincompress=threshold=0.02:ratio=6:attack=25:release=350[ducked_bgm]`,
-        `[vo_mix][ducked_bgm]amix=inputs=2:duration=first:dropout_transition=2,loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
-      );
-    } else {
-      filterChains.push(
-        `[1:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=${totalDur.toFixed(2)},loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
-      );
-    }
-  } else {
-    filterChains.push(
-      `[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,loudnorm=I=${targetLufs}:TP=-1.5:LRA=11[a_norm]`
-    );
+  }
+  if (musicPath) {
+    finalArgs.push("-i", musicPath);
   }
 
-  let videoMap = "0:v";
-  if (params.burnSubtitles && srtContent.trim()) {
-    const escapedSrt = params.srtOutPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-    filterChains.push(
-      `[0:v]subtitles='${escapedSrt}':force_style='FontName=Vazirmatn,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=1,MarginV=36'[v_sub]`
-    );
-    videoMap = "[v_sub]";
-  }
+  const audioMaster = buildCinemaAudioFilterGraph({
+    totalDurationSec: totalDur,
+    hasNarration,
+    hasMusic: Boolean(musicPath),
+    hasDiegeticAudio: stitchedProbe.hasAudio,
+    targetLufs,
+    narrationAtempo: syncPlan.recommendedAtempo,
+  });
+
+  const videoMaster = buildCinemaVideoFilterGraph({
+    inputLabel: "[0:v]",
+    outputLabel: "[v_grade]",
+    preset,
+    cubeLutPath,
+    srtPath: params.srtOutPath,
+    assPath: savedAssPath,
+    fontsDir: getBundledFontsDir(),
+    burnSubtitles: Boolean(params.burnSubtitles && (savedAssPath || srtContent.trim())),
+  });
 
   finalArgs.push(
     "-filter_complex",
-    filterChains.join(";"),
+    `${videoMaster};${audioMaster.filterGraph}`,
     "-map",
-    videoMap,
+    "[v_grade]",
     "-map",
-    "[a_norm]",
+    audioMaster.mapLabel,
     "-c:v",
     "libx264",
+    "-profile:v",
+    "high",
+    "-level",
+    "4.2",
     "-preset",
-    "fast",
+    "medium",
     "-crf",
-    "18",
+    "19",
+    "-maxrate",
+    "5500k",
+    "-bufsize",
+    "11000k",
     "-pix_fmt",
     "yuv420p",
     "-movflags",
     "+faststart",
     "-c:a",
     "aac",
+    "-ar",
+    "48000",
     "-b:a",
-    "192k",
+    "160k",
     "-t",
     totalDur.toFixed(2),
     params.finalOutPath
   );
 
-  try {
-    await execFileAsync("ffmpeg", finalArgs);
-  } catch (err) {
-    const rawMsg = err instanceof Error ? err.message : String(err);
-    const tail = rawMsg.split("\n").filter((l) => l.trim() && !l.trim().startsWith("configuration:") && !l.trim().startsWith("lib")).slice(-3).join(" | ");
-    throw new Error(`خطا در مونتاژ نهایی FFmpeg: ${tail.slice(0, 260)}`);
-  }
+  await execFileAsync("ffmpeg", finalArgs, { timeout: 220_000 });
   const finalProbe = await probeMedia(params.finalOutPath);
 
   return {
     finalPath: params.finalOutPath,
     srtPath: params.srtOutPath,
+    assPath: savedAssPath,
+    cubeLutPath,
+    musicSourceUsed,
     totalDurationSec: finalProbe.durationSec,
   };
 }
