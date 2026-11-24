@@ -2,18 +2,29 @@ import { useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  CloudUpload,
   Cpu,
   Download,
   ExternalLink,
   Layers,
+  Play,
   Plug,
   RefreshCw,
-  Server,
   ShieldCheck,
+  Square,
   Terminal,
   Unplug,
   Wrench,
+  Zap,
 } from "lucide-react";
+import {
+  auth,
+  getGoogleDriveAccessToken,
+  signInWithGoogleForColabDrive,
+  subscribeAuthState,
+  subscribeGoogleDriveToken,
+} from "../lib/firebase";
 
 type EngineStackId =
   | "blender"
@@ -91,6 +102,47 @@ interface ColabConnectionConfig {
   updatedAt: string;
 }
 
+interface ColabDriveNotebookRecord {
+  fileId: string;
+  fileName: string;
+  folderId: string | null;
+  colabUrl: string;
+  driveWebViewLink: string;
+  projectId: string | null;
+  modelPreset: "wan22_5b_gguf" | "wan22_fp8_14b" | "ltx_video_fp8";
+  syncedAt: string;
+}
+
+interface ColabCliLogEntry {
+  timestamp: string;
+  stage: "cli" | "drive" | "runtime" | "shot";
+  level: "info" | "success" | "warn" | "error";
+  messageFa: string;
+}
+
+interface ColabCliRuntimeStatus {
+  cliInstalled: boolean;
+  cliBinaryPath: string | null;
+  cliVersion: string | null;
+  cliAuthenticated: boolean;
+  activeSessions: string[];
+  bridge: ColabConnectionConfig;
+  config: {
+    autopilotEnabled: boolean;
+    preferredGpu: "T4" | "L4" | "G4" | "A100" | "H100";
+    modelPreset: "wan22_5b_gguf" | "wan22_fp8_14b" | "ltx_video_fp8";
+    sessionName: string;
+    colabAccountEmail: string | null;
+    driveNotebook: ColabDriveNotebookRecord | null;
+    lastProvisionedAt: string | null;
+    lastProvisionStatus: "idle" | "ready" | "notebook_synced" | "needs_cli_auth" | "error";
+    lastProvisionMessageFa: string | null;
+    logs: ColabCliLogEntry[];
+    updatedAt: string;
+  };
+  autoReadyForShots: boolean;
+}
+
 const ENGINE_FILTER_TABS: Array<{ id: "all" | EngineStackId; label: string }> = [
   { id: "all", label: "همه ابزارها" },
   { id: "hyperframes", label: "HyperFrames" },
@@ -117,14 +169,24 @@ const HOST_LABELS: Record<EngineStackDefinition["executionHost"], string> = {
 export function ToolchainAndColabView() {
   const [toolchain, setToolchain] = useState<McpToolchainState | null>(null);
   const [colab, setColab] = useState<ColabConnectionConfig | null>(null);
+  const [cliStatus, setCliStatus] = useState<ColabCliRuntimeStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedEngine, setSelectedEngine] = useState<"all" | EngineStackId>("all");
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  // Google Workspace Drive auth state (in-memory token only)
+  const [googleEmail, setGoogleEmail] = useState<string | null>(auth.currentUser?.email || null);
+  const [driveToken, setDriveToken] = useState<string | null>(getGoogleDriveAccessToken());
+  const [googleSigningIn, setGoogleSigningIn] = useState(false);
+  const [cliBusy, setCliBusy] = useState(false);
+  const [confirmOverwriteModal, setConfirmOverwriteModal] = useState(false);
+  const [showAdvancedManualColab, setShowAdvancedManualColab] = useState(false);
 
   // Colab form state
   const [notebookPreset, setNotebookPreset] = useState<
     "wan22_5b_gguf" | "wan22_fp8_14b" | "ltx_video_fp8"
   >("wan22_5b_gguf");
+  const [preferredGpu, setPreferredGpu] = useState<"T4" | "L4" | "A100">("T4");
   const [bridgeUrl, setBridgeUrl] = useState("");
   const [authToken, setAuthToken] = useState("");
   const [colabEmail, setColabEmail] = useState("");
@@ -134,12 +196,25 @@ export function ToolchainAndColabView() {
     message: string;
   } | null>(null);
 
+  useEffect(() => {
+    const unsubAuth = subscribeAuthState((u) => {
+      setGoogleEmail(u?.email || null);
+      if (u?.email) setColabEmail((prev) => prev || u.email || "");
+    });
+    const unsubToken = subscribeGoogleDriveToken((t) => setDriveToken(t));
+    return () => {
+      unsubAuth();
+      unsubToken();
+    };
+  }, []);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [tcRes, colabRes] = await Promise.all([
+      const [tcRes, colabRes, cliRes] = await Promise.all([
         fetch("/api/toolchain/state"),
         fetch("/api/colab/status"),
+        fetch("/api/colab/cli/status"),
       ]);
       if (tcRes.ok) {
         const tcData = (await tcRes.json()) as { toolchain?: McpToolchainState };
@@ -154,6 +229,15 @@ export function ToolchainAndColabView() {
           setColabEmail((prev) => prev || cData.colab?.colabAccountEmail || "");
         }
       }
+      if (cliRes.ok) {
+        const cliData = (await cliRes.json()) as { cliStatus?: ColabCliRuntimeStatus };
+        if (cliData.cliStatus) {
+          setCliStatus(cliData.cliStatus);
+          setNotebookPreset(cliData.cliStatus.config.modelPreset);
+          const g = cliData.cliStatus.config.preferredGpu;
+          if (g === "T4" || g === "L4" || g === "A100") setPreferredGpu(g);
+        }
+      }
     } catch {
       // Keep honest UI error state
     } finally {
@@ -164,6 +248,177 @@ export function ToolchainAndColabView() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  const handleConnectGoogleForColab = async () => {
+    setGoogleSigningIn(true);
+    setColabFeedback(null);
+    try {
+      const { user, accessToken } = await signInWithGoogleForColabDrive();
+      setGoogleEmail(user.email || null);
+      if (user.email) setColabEmail(user.email);
+      if (!accessToken) {
+        setColabFeedback({
+          ok: false,
+          message: "ورود انجام شد اما توکن Google Drive دریافت نشد. لطفاً دوباره روی دکمه ورود با گوگل کلیک کنید.",
+        });
+        return;
+      }
+      // Save email on server config & immediately create ready-to-run GPU notebook in user's Colab Drive
+      await fetch("/api/colab/cli/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ colabAccountEmail: user.email, autopilotEnabled: true }),
+      });
+      const nbRes = await fetch("/api/colab/cli/drive-notebook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          modelPreset: notebookPreset,
+          profileEmail: user.email || undefined,
+        }),
+      });
+      const nbData = (await nbRes.json()) as {
+        notebook?: ColabDriveNotebookRecord;
+        cliStatus?: ColabCliRuntimeStatus;
+        error?: string;
+      };
+      if (nbRes.ok && nbData.cliStatus) {
+        setCliStatus(nbData.cliStatus);
+        setColabFeedback({
+          ok: true,
+          message: `حساب Google Colab (${user.email}) متصل شد و نوتبوک آماده «${nbData.notebook?.fileName}» به صورت خودکار در پوشه Colab Notebooks شما ساخته شد!`,
+        });
+      } else {
+        setColabFeedback({
+          ok: false,
+          message: nbData.error || "حساب گوگل متصل شد اما ساخت خودکار نوتبوک در درایو با خطا مواجه شد.",
+        });
+      }
+    } catch (err) {
+      setColabFeedback({
+        ok: false,
+        message: err instanceof Error ? err.message : "خطا در ورود با حساب گوگل",
+      });
+    } finally {
+      setGoogleSigningIn(false);
+    }
+  };
+
+  const handleSyncDriveNotebook = async (overwriteExisting: boolean) => {
+    const token = getGoogleDriveAccessToken();
+    if (!token) {
+      await handleConnectGoogleForColab();
+      return;
+    }
+    setCliBusy(true);
+    setConfirmOverwriteModal(false);
+    setColabFeedback(null);
+    try {
+      const res = await fetch("/api/colab/cli/drive-notebook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          modelPreset: notebookPreset,
+          profileEmail: googleEmail || colabEmail || undefined,
+          overwriteExistingFileId: overwriteExisting
+            ? cliStatus?.config.driveNotebook?.fileId
+            : undefined,
+        }),
+      });
+      const data = (await res.json()) as {
+        notebook?: ColabDriveNotebookRecord;
+        cliStatus?: ColabCliRuntimeStatus;
+        error?: string;
+      };
+      if (!res.ok) {
+        setColabFeedback({ ok: false, message: data.error || "ساخت نوتبوک در Google Drive ناموفق بود." });
+        return;
+      }
+      if (data.cliStatus) setCliStatus(data.cliStatus);
+      setColabFeedback({
+        ok: true,
+        message: `نوتبوک آماده «${data.notebook?.fileName}» با موفقیت در Google Colab Drive شما ذخیره شد.`,
+      });
+    } finally {
+      setCliBusy(false);
+    }
+  };
+
+  const handleUpdateCliSettings = async (patch: {
+    autopilotEnabled?: boolean;
+    preferredGpu?: "T4" | "L4" | "A100";
+    modelPreset?: "wan22_5b_gguf" | "wan22_fp8_14b" | "ltx_video_fp8";
+  }) => {
+    if (patch.preferredGpu) setPreferredGpu(patch.preferredGpu);
+    if (patch.modelPreset) setNotebookPreset(patch.modelPreset);
+    const res = await fetch("/api/colab/cli/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { cliStatus?: ColabCliRuntimeStatus };
+      if (data.cliStatus) setCliStatus(data.cliStatus);
+    }
+  };
+
+  const handleAutoProvisionCli = async () => {
+    setCliBusy(true);
+    setColabFeedback(null);
+    try {
+      const token = getGoogleDriveAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch("/api/colab/cli/provision", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ profileEmail: googleEmail || colabEmail || undefined }),
+      });
+      const data = (await res.json()) as {
+        result?: { ready?: boolean; messageFa?: string };
+        cliStatus?: ColabCliRuntimeStatus;
+        toolchain?: McpToolchainState;
+        error?: string;
+      };
+      if (data.cliStatus) {
+        setCliStatus(data.cliStatus);
+        setColab(data.cliStatus.bridge);
+      }
+      if (data.toolchain) setToolchain(data.toolchain);
+      setColabFeedback({
+        ok: Boolean(res.ok && (data.result?.ready || data.cliStatus?.config.driveNotebook)),
+        message: data.result?.messageFa || data.error || "بررسی و راه‌اندازی Colab CLI انجام شد.",
+      });
+    } finally {
+      setCliBusy(false);
+    }
+  };
+
+  const handleStopCliSession = async () => {
+    setCliBusy(true);
+    setColabFeedback(null);
+    try {
+      const res = await fetch("/api/colab/cli/stop", { method: "POST" });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        messageFa?: string;
+        cliStatus?: ColabCliRuntimeStatus;
+      };
+      if (data.cliStatus) setCliStatus(data.cliStatus);
+      setColabFeedback({
+        ok: Boolean(data.ok),
+        message: data.messageFa || "درخواست توقف نشست ارسال شد.",
+      });
+    } finally {
+      setCliBusy(false);
+    }
+  };
 
   const handleToggleAddon = async (addon: ToolchainAddonItem) => {
     setTogglingId(addon.id);
@@ -330,41 +585,291 @@ export function ToolchainAndColabView() {
         </div>
       </div>
 
-      {/* SECTION 1: Real Google Colab GPU Runtime (Zero Mockup) */}
-      <section className="rounded-xl border border-[#262B38] bg-[#14171F] p-6 space-y-6">
+      {/* SECTION 0: Official Google Colab CLI Autopilot + Automatic Google Drive Notebook */}
+      <section className="rounded-xl border border-amber-500/30 bg-[#14171F] p-6 space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#262B38] pb-4">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs text-sky-400 font-medium">
-              <Cpu className="h-4 w-4" />
-              <span>محیط اجرای واقعی روی اکانت Google Colab شما (بدون موکاپ و شبیه‌سازی)</span>
+            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-amber-400">
+              <Zap className="h-4 w-4" />
+              <span>اتصال خودکار Google Colab CLI + ساخت اتوماتیک نوتبوک در اکانت شما</span>
+              {cliStatus?.cliInstalled && (
+                <span className="rounded bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                  {cliStatus.cliVersion || "google-colab-cli"} · نصب‌شده
+                </span>
+              )}
             </div>
             <h2 className="text-base font-bold text-slate-100">
-              نصب و اجرای واقعی ComfyUI + Blender 4.2 GPU + FFmpeg + فونت فارسی روی Colab
+              اجرای بی‌دخالت ComfyUI و Blender روی GPU کولب پس از تایید استوری‌بورد و برای هر شات
             </h2>
+            <p className="text-xs leading-6 text-slate-400">
+              فقط یک‌بار با حساب گوگل متصل شوید. پس از آن، هر زمان استوری‌بورد را تایید کنید یا روی رندر شات کلیک کنید،
+              سیستم به‌صورت خودکار نوتبوک آماده (با تمام پیش‌نیازهای ComfyUI، Blender 4.2، FFmpeg و فونت فارسی) را در{" "}
+              <strong className="text-slate-200">Colab Notebooks</strong> حساب شما می‌سازد و از طریق{" "}
+              <strong className="text-slate-200">Colab CLI</strong> ماشین GPU را بالا می‌آورد.
+            </p>
           </div>
 
-          <div className="text-xs font-medium tabular-nums">
-            {isColabLive ? (
-              <span className="inline-flex items-center gap-1.5 text-emerald-400">
-                <CheckCircle2 className="h-4 w-4" />
-                <span>
-                  متصل به GPU واقعی ({colab?.lastHealth?.gpuModel || "NVIDIA"})
-                </span>
-              </span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            {driveToken && googleEmail ? (
+              <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span dir="ltr" className="font-mono">{googleEmail}</span>
+              </div>
             ) : (
-              <span className="inline-flex items-center gap-1.5 text-slate-400">
-                <Server className="h-4 w-4 text-slate-500" />
-                <span>قطع · منتظر اجرای نوتبوک واقعی روی Google Colab</span>
-              </span>
+              <button
+                type="button"
+                disabled={googleSigningIn}
+                onClick={() => void handleConnectGoogleForColab()}
+                className="inline-flex items-center gap-2.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-900 shadow-sm transition-colors hover:bg-slate-100 disabled:opacity-60"
+              >
+                <svg className="h-4 w-4 shrink-0" viewBox="0 0 48 48" aria-hidden="true">
+                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+                </svg>
+                <span>{googleSigningIn ? "در حال اتصال به Google Colab..." : "Sign in with Google · اتصال خودکار Colab"}</span>
+              </button>
             )}
           </div>
         </div>
 
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <div className="space-y-3 rounded-xl border border-[#262B38] bg-[#0B0D11] p-4 lg:col-span-7">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="inline-flex cursor-pointer items-center gap-2.5 text-xs font-semibold text-slate-100">
+                <input
+                  type="checkbox"
+                  checked={cliStatus?.config.autopilotEnabled ?? true}
+                  onChange={(e) =>
+                    void handleUpdateCliSettings({ autopilotEnabled: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded border-slate-600 bg-[#14171F] accent-amber-500"
+                />
+                <span>راه‌اندازی کاملاً خودکار Colab GPU پس از تایید استوری‌بورد و هنگام ساخت هر شات</span>
+              </label>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-400">کارت گرافیک:</span>
+                <select
+                  value={preferredGpu}
+                  onChange={(e) =>
+                    void handleUpdateCliSettings({
+                      preferredGpu: e.target.value as "T4" | "L4" | "A100",
+                    })
+                  }
+                  className="rounded-lg border border-[#262B38] bg-[#14171F] px-2.5 py-1.5 text-xs text-slate-100 focus:border-amber-500 focus:outline-none"
+                >
+                  <option value="T4">NVIDIA T4 (رایگان · 15GB)</option>
+                  <option value="L4">NVIDIA L4 (24GB)</option>
+                  <option value="A100">NVIDIA A100 (40GB)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={cliBusy || googleSigningIn}
+                onClick={() => {
+                  if (cliStatus?.config.driveNotebook?.fileId && driveToken) {
+                    setConfirmOverwriteModal(true);
+                  } else {
+                    void handleSyncDriveNotebook(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-bold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50"
+              >
+                <CloudUpload className="h-3.5 w-3.5" />
+                <span>
+                  {cliStatus?.config.driveNotebook
+                    ? "بروزرسانی نوتبوک در Google Colab من"
+                    : "ساخت خودکار نوتبوک آماده در Google Colab من"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={cliBusy}
+                onClick={() => void handleAutoProvisionCli()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3.5 py-2 text-xs font-bold text-slate-950 transition-colors hover:bg-sky-400 disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>{cliBusy ? "در حال اجرای Colab CLI..." : "راه‌اندازی خودکار GPU با Colab CLI"}</span>
+              </button>
+
+              {cliStatus && cliStatus.activeSessions.length > 0 && (
+                <button
+                  type="button"
+                  disabled={cliBusy}
+                  onClick={() => void handleStopCliSession()}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                  <span>توقف نشست GPU</span>
+                </button>
+              )}
+            </div>
+
+            {confirmOverwriteModal && cliStatus?.config.driveNotebook && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100 space-y-2.5">
+                <div className="font-semibold">
+                  آیا می‌خواهید فایل نوتبوک «{cliStatus.config.driveNotebook.fileName}» در Google Drive شما با نسخه جدید جایگزین شود یا یک نسخه جدید ساخته شود؟
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleSyncDriveNotebook(true)}
+                    className="rounded-md bg-amber-500 px-3 py-1.5 font-bold text-slate-950 hover:bg-amber-400"
+                  >
+                    بله، جایگزین کن
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSyncDriveNotebook(false)}
+                    className="rounded-md border border-slate-500 bg-[#14171F] px-3 py-1.5 text-slate-200 hover:bg-[#1B1F2A]"
+                  >
+                    ساخت فایل جدید بدون تغییر قبلی
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmOverwriteModal(false)}
+                    className="rounded-md px-3 py-1.5 text-slate-400 hover:text-slate-200"
+                  >
+                    انصراف
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {cliStatus?.config.driveNotebook && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 text-xs">
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-emerald-300">
+                    نوتبوک آماده در Google Drive شما ذخیره شد:
+                  </div>
+                  <div dir="ltr" className="font-mono text-[11px] text-slate-300">
+                    Colab Notebooks / {cliStatus.config.driveNotebook.fileName}
+                  </div>
+                </div>
+                <a
+                  href={cliStatus.config.driveNotebook.colabUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-1.5 font-semibold text-emerald-200 hover:bg-emerald-500/30"
+                >
+                  <span>باز کردن مستقیم در Colab</span>
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2.5 rounded-xl border border-[#262B38] bg-[#0B0D11] p-4 lg:col-span-5">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-200">
+              <span className="inline-flex items-center gap-1.5">
+                <Terminal className="h-3.5 w-3.5 text-amber-400" />
+                <span>وضعیت زنده google-colab-cli</span>
+              </span>
+              <span className="font-mono text-[11px] text-slate-400">
+                {cliStatus?.activeSessions.length
+                  ? `${cliStatus.activeSessions.length} نشست فعال`
+                  : cliStatus?.cliInstalled
+                    ? "آماده اجرا"
+                    : "نصب‌نشده"}
+              </span>
+            </div>
+
+            <div className="space-y-1.5 text-[11px] text-slate-300">
+              <div className="flex items-center justify-between border-b border-[#262B38]/60 pb-1">
+                <span className="text-slate-400">باینری رسمی Colab CLI:</span>
+                <span dir="ltr" className="font-mono text-emerald-300">
+                  {cliStatus?.cliInstalled ? cliStatus.cliVersion || "installed" : "یافت نشد"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between border-b border-[#262B38]/60 pb-1">
+                <span className="text-slate-400">حالت خودکار استوری‌بورد → شات:</span>
+                <span className={cliStatus?.config.autopilotEnabled ? "text-emerald-300 font-semibold" : "text-slate-500"}>
+                  {cliStatus?.config.autopilotEnabled ? "فعال (Zero-Touch)" : "غیرفعال"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">وضعیت اتصال GPU:</span>
+                <span className={cliStatus?.autoReadyForShots ? "text-emerald-300 font-semibold" : "text-amber-300"}>
+                  {cliStatus?.autoReadyForShots
+                    ? `آنلاین (${cliStatus.bridge.lastHealth?.gpuModel || preferredGpu})`
+                    : cliStatus?.config.driveNotebook
+                      ? "نوتبوک در درایو آماده است"
+                      : "در انتظار ورود با گوگل"}
+                </span>
+              </div>
+            </div>
+
+            {cliStatus?.config.logs && cliStatus.config.logs.length > 0 && (
+              <div className="max-h-24 overflow-y-auto rounded-lg border border-[#262B38] bg-[#14171F] p-2 space-y-1">
+                {cliStatus.config.logs.slice(-4).reverse().map((entry, idx) => (
+                  <div key={idx} className="text-[11px] leading-5 text-slate-300">
+                    <span className="text-amber-400">•</span> {entry.messageFa}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {colabFeedback && (
+          <div
+            className={`flex items-start gap-2 rounded-lg border px-3.5 py-2.5 text-xs leading-6 ${
+              colabFeedback.ok
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                : "border-red-500/40 bg-red-500/10 text-red-200"
+            }`}
+          >
+            {colabFeedback.ok ? (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+            )}
+            <span>{colabFeedback.message}</span>
+          </div>
+        )}
+      </section>
+
+      {/* SECTION 1: Advanced / Manual Google Colab Tunnel (Collapsed by default to keep UX simple) */}
+      <section className="rounded-xl border border-[#262B38] bg-[#14171F] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowAdvancedManualColab((v) => !v)}
+          className="flex w-full flex-wrap items-center justify-between gap-4 px-6 py-4 text-right transition-colors hover:bg-[#1A1E29]"
+        >
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2 text-xs text-sky-400 font-medium">
+              <Cpu className="h-4 w-4" />
+              <span>تنظیمات پیشرفته و اتصال دستی تونل Colab (اختیاری — برای کاربران حرفه‌ای)</span>
+            </div>
+            <div className="text-xs text-slate-400">
+              {isColabLive
+                ? `متصل به GPU واقعی (${colab?.lastHealth?.gpuModel || "NVIDIA"})`
+                : "در حالت عادی نیازی به این بخش نیست؛ سیستم به‌صورت خودکار از طریق Colab CLI متصل می‌شود."}
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-300">
+            <span>{showAdvancedManualColab ? "بستن تنظیمات دستی" : "نمایش اتصال دستی"}</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${
+                showAdvancedManualColab ? "rotate-180" : ""
+              }`}
+            />
+          </span>
+        </button>
+
+        {showAdvancedManualColab && (
+        <div className="border-t border-[#262B38] p-6">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           {/* Left: Step 1 Download Notebook */}
           <div className="space-y-4 rounded-xl border border-[#262B38] bg-[#0B0D11] p-4 lg:col-span-5">
             <div className="text-xs font-bold text-slate-100">
-              گام ۱ · دانلود و اجرای نوتبوک All-in-One در Google Colab
+              گام ۱ · دانلود دستی نوتبوک All-in-One (در صورت نیاز)
             </div>
             <p className="text-xs leading-6 text-slate-400">
               این نوتبوک واقعی به‌صورت خودکار{" "}
@@ -574,6 +1079,8 @@ export function ToolchainAndColabView() {
             )}
           </div>
         </div>
+        </div>
+        )}
       </section>
 
       {/* SECTION 2: Free Open-Source Engine Matrix */}

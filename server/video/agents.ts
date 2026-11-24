@@ -119,6 +119,12 @@ export async function parseScenarioToShotSpecs(params: {
         .filter(Boolean)
         .join(" | ");
 
+      const isCtaShot =
+        mappedTool === "remotion" &&
+        /فالو|دنبال|ذخیره|لایک|کامنت|cta|follow|subscribe/i.test(
+          `${s.onScreenText || ""} ${seven.objects} ${seven.scene}`
+        );
+
       return {
         shot_id: `shot_${String(shotNum).padStart(2, "0")}`,
         shot_number: shotNum,
@@ -129,11 +135,12 @@ export async function parseScenarioToShotSpecs(params: {
         narration_text: s.spokenSegment || s.onScreenText || "",
         tool: mappedTool,
         visual: {
-          layout: mappedTool === "remotion" ? "hero" : "generative_clip",
+          layout: isCtaShot ? "cta" : mappedTool === "remotion" ? "hero" : "generative_clip",
           primary_subject: seven.objects.slice(0, 110) || s.onScreenText || s.sceneDescriptionFa.slice(0, 80),
           background: seven.scene.slice(0, 120) || s.lightingAndMood || "پس‌زمینه تاریک و سینمایی",
           foreground_elements: [s.onScreenText || s.cameraAngle].filter(Boolean),
           headline: s.onScreenText || undefined,
+          cta_label: isCtaShot ? "فالو + ذخیره ریلز صنعتی" : undefined,
           camera_motion: cameraMotion,
           animation_notes: seven.animation || s.cameraMovement || "حرکت نرم و کنترل‌شده دوربین + ذرات معلق",
           blender_prompt: enrichedPrompt,
@@ -697,7 +704,7 @@ export async function evaluateShotWithVisualCritic(params: {
 
   let rawJsonText = "";
   const modelsToTry = Array.from(
-    new Set(["gemini-3.1-flash-lite", cfg.visionCriticModel].filter(Boolean))
+    new Set(["gemini-3.5-flash", "gemini-3.1-flash-lite", cfg.visionCriticModel].filter(Boolean))
   );
   let lastErr: unknown = null;
 

@@ -57,7 +57,8 @@ export function buildHyperFramesHtmlDocument(params: {
   const [width, height] = params.spec.resolution;
   const seven = params.spec.seven_layer_spec;
   const headline = (params.spec.visual.headline || params.spec.visual.primary_subject || "").trim().slice(0, 65);
-  const badge = (params.spec.visual.badge_text || `شات ${params.spec.shot_number}`).trim().slice(0, 42);
+  const rawBadge = (params.spec.visual.badge_text || "").trim().slice(0, 38);
+  const cleanBadge = /^شات\s*[۰-۹0-9]+$/i.test(rawBadge) ? "" : rawBadge;
   const lightingText = (seven?.lighting || params.spec.style.mood || "").toLowerCase();
   const objectText = (seven?.objects || params.spec.visual.primary_subject || "").toLowerCase();
 
@@ -86,8 +87,12 @@ export function buildHyperFramesHtmlDocument(params: {
   const lalezarUri = loadFontDataUri("Lalezar-Regular.ttf");
 
   const safeHeadline = escapeHtml(headline);
-  const safeBadge = escapeHtml(badge);
+  const safeBadge = escapeHtml(cleanBadge);
   const safeLightingNote = escapeHtml((seven?.lighting || "").slice(0, 80));
+
+  const cornerInsetX = Math.round(width * 0.055);
+  const cornerInsetTop = Math.round(height * 0.048);
+  const cornerInsetBottom = Math.round(height * 0.11);
 
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -101,7 +106,7 @@ export function buildHyperFramesHtmlDocument(params: {
     width: ${width}px;
     height: ${height}px;
     overflow: hidden;
-    background: #05080F;
+    background: #04070E;
     font-family: 'VazirmatnHF', 'LalezarHF', sans-serif;
     color: #F8FAFC;
   }
@@ -110,15 +115,17 @@ export function buildHyperFramesHtmlDocument(params: {
     width: ${width}px;
     height: ${height}px;
     overflow: hidden;
-    background: radial-gradient(ellipse at 50% 34%, #101B2E 0%, #060911 58%, #020307 100%);
+    perspective: 1400px;
+    background: radial-gradient(ellipse at 50% 36%, #111D33 0%, #060912 60%, #020307 100%);
   }
   #camera-rig {
     position: absolute;
-    inset: -6%;
-    width: 112%;
-    height: 112%;
+    inset: -7%;
+    width: 114%;
+    height: 114%;
     will-change: transform;
-    transform-origin: 50% 50%;
+    transform-origin: 50% 48%;
+    transform-style: preserve-3d;
   }
   #bg-photo {
     position: absolute;
@@ -126,14 +133,14 @@ export function buildHyperFramesHtmlDocument(params: {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    filter: contrast(1.12) saturate(1.06) brightness(0.92);
+    filter: contrast(1.14) saturate(1.08) brightness(0.93);
   }
   #vignette-scrim {
     position: absolute;
     inset: 0;
     background:
-      linear-gradient(180deg, rgba(4,7,14,0.72) 0%, rgba(4,7,14,0.12) 26%, rgba(4,7,14,0.15) 66%, rgba(4,7,14,0.88) 100%),
-      radial-gradient(circle at 50% 42%, transparent 32%, rgba(2,5,11,0.68) 100%);
+      linear-gradient(180deg, rgba(3,6,13,0.82) 0%, rgba(3,6,13,0.28) 20%, rgba(3,6,13,0.06) 44%, rgba(3,6,13,0.16) 68%, rgba(3,6,13,0.92) 100%),
+      radial-gradient(circle at 50% 45%, transparent 34%, rgba(2,5,11,0.62) 100%);
     pointer-events: none;
   }
   #fx-canvas {
@@ -143,59 +150,62 @@ export function buildHyperFramesHtmlDocument(params: {
     height: ${height}px;
     pointer-events: none;
   }
+  #entry-flare {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 42%, ${rimColorB}55 0%, ${rimColorA}28 38%, transparent 72%);
+    mix-blend-mode: screen;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .cad-reticle {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    pointer-events: none;
+    opacity: 0.45;
+  }
+  .cad-tl { top: ${cornerInsetTop}px; left: ${cornerInsetX}px; border-top: 1.5px solid ${accentHex}; border-left: 1.5px solid ${accentHex}; }
+  .cad-tr { top: ${cornerInsetTop}px; right: ${cornerInsetX}px; border-top: 1.5px solid ${accentHex}; border-right: 1.5px solid ${accentHex}; }
+  .cad-bl { bottom: ${cornerInsetBottom}px; left: ${cornerInsetX}px; border-bottom: 1.5px solid rgba(255,255,255,0.42); border-left: 1.5px solid rgba(255,255,255,0.42); }
+  .cad-br { bottom: ${cornerInsetBottom}px; right: ${cornerInsetX}px; border-bottom: 1.5px solid rgba(255,255,255,0.42); border-right: 1.5px solid rgba(255,255,255,0.42); }
   #typo-layer {
     position: absolute;
-    top: ${Math.round(height * 0.085)}px;
-    left: ${Math.round(width * 0.07)}px;
-    right: ${Math.round(width * 0.07)}px;
+    top: ${Math.round(height * 0.095)}px;
+    left: ${Math.round(width * 0.08)}px;
+    right: ${Math.round(width * 0.08)}px;
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
-    gap: 18px;
+    gap: 14px;
     pointer-events: none;
   }
-  .kicker-line {
-    display: inline-flex;
-    align-items: center;
-    gap: 12px;
-    font-size: ${Math.round(width * 0.028)}px;
-    font-weight: 800;
-    letter-spacing: 0.02em;
-    color: ${accentHex};
-    text-shadow: 0 4px 20px rgba(0,0,0,0.85);
+  .accent-hairline {
+    width: 84px;
+    height: 3px;
+    background: linear-gradient(90deg, transparent, ${accentHex}, #FFFFFF, ${accentHex}, transparent);
+    border-radius: 2px;
+    box-shadow: 0 0 18px ${accentHex}99;
     opacity: 0;
   }
-  .kicker-rule {
-    width: 44px;
-    height: 3px;
-    background: linear-gradient(90deg, transparent, ${accentHex}, #FFFFFF);
-    border-radius: 2px;
+  .bento-tag {
+    font-family: 'VazirmatnHF', sans-serif;
+    font-size: ${Math.round(width * 0.024)}px;
+    font-weight: 800;
+    color: ${accentHex};
+    letter-spacing: 0.03em;
+    text-shadow: 0 2px 16px rgba(0,0,0,0.9);
+    opacity: 0;
   }
   .hero-headline {
     font-family: 'LalezarHF', 'VazirmatnHF', sans-serif;
-    font-size: ${Math.round(width * 0.078)}px;
+    font-size: ${Math.round(width * 0.076)}px;
     line-height: 1.18;
     color: #FFFFFF;
-    text-shadow: 0 8px 34px rgba(0,0,0,0.92), 0 0 24px rgba(56,189,248,0.28);
-    max-width: 92%;
+    text-shadow: 0 10px 38px rgba(0,0,0,0.96), 0 0 26px ${rimColorA}55;
+    max-width: 94%;
     opacity: 0;
-  }
-  .spec-bar {
-    position: absolute;
-    bottom: ${Math.round(height * 0.24)}px;
-    left: ${Math.round(width * 0.12)}px;
-    right: ${Math.round(width * 0.12)}px;
-    height: 3px;
-    background: rgba(255,255,255,0.12);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .spec-bar-fill {
-    width: 0%;
-    height: 100%;
-    background: linear-gradient(90deg, ${rimColorA}, ${rimColorB});
-    box-shadow: 0 0 18px ${rimColorA};
   }
 </style>
 </head>
@@ -206,15 +216,16 @@ export function buildHyperFramesHtmlDocument(params: {
   </div>
   <canvas id="fx-canvas" width="${width}" height="${height}"></canvas>
   <div id="vignette-scrim"></div>
+  <div id="entry-flare"></div>
+  <div class="cad-reticle cad-tl"></div>
+  <div class="cad-reticle cad-tr"></div>
+  <div class="cad-reticle cad-bl"></div>
+  <div class="cad-reticle cad-br"></div>
   <div id="typo-layer">
-    <div id="kicker" class="kicker-line">
-      <span class="kicker-rule"></span>
-      <span>${safeBadge}</span>
-      <span class="kicker-rule"></span>
-    </div>
+    <div id="accent-line" class="accent-hairline"></div>
+    ${safeBadge ? `<div id="bento-tag" class="bento-tag">${safeBadge}</div>` : ""}
     ${safeHeadline ? `<h1 id="headline" class="hero-headline">${safeHeadline}</h1>` : ""}
   </div>
-  <div class="spec-bar"><div id="spec-fill" class="spec-bar-fill"></div></div>
 </div>
 <script>
 (function() {
@@ -230,78 +241,82 @@ export function buildHyperFramesHtmlDocument(params: {
   const canvas = document.getElementById('fx-canvas');
   const ctx = canvas.getContext('2d');
   const rig = document.getElementById('camera-rig');
-  const kicker = document.getElementById('kicker');
+  const accentLine = document.getElementById('accent-line');
+  const bentoTag = document.getElementById('bento-tag');
   const headline = document.getElementById('headline');
-  const specFill = document.getElementById('spec-fill');
+  const entryFlare = document.getElementById('entry-flare');
 
-  // Deterministic pseudo-random floating particles (dust motes & subtle metallic sparks)
+  // Deterministic pseudo-random multi-depth metallic dust motes & subtle embers
   const particles = [];
   let seed = ${params.spec.shot_number * 9973 + 1337};
   function rand() {
     seed = (seed * 16807) % 2147483647;
     return (seed - 1) / 2147483646;
   }
-  for (let i = 0; i < 68; i++) {
+  for (let i = 0; i < 82; i++) {
+    const depth = 0.4 + rand() * 1.1;
     particles.push({
       x: rand() * W,
       y: rand() * H,
-      r: 1.4 + rand() * 3.8,
-      vx: (rand() - 0.45) * 42,
-      vy: -22 - rand() * 68,
-      alpha: 0.2 + rand() * 0.65,
-      warm: rand() > 0.45
+      r: (1.2 + rand() * 3.4) * depth,
+      vx: (rand() - 0.45) * 44 * depth,
+      vy: (-18 - rand() * 64) * depth,
+      alpha: 0.18 + rand() * 0.62,
+      warm: rand() > 0.42
     });
   }
 
-  function easeOutCubic(t) {
+  function easeOutBack(t) {
     const c = Math.max(0, Math.min(1, t));
-    return 1 - Math.pow(1 - c, 3);
+    const c1 = 1.35;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(c - 1, 3) + c1 * Math.pow(c - 1, 2);
+  }
+
+  function easeOutExpo(t) {
+    const c = Math.max(0, Math.min(1, t));
+    return c === 1 ? 1 : 1 - Math.pow(2, -10 * c);
   }
 
   function drawProceduralSteelPipe(progress) {
-    // High-contrast cinematic brushed steel pipe cylinder with white & blue specular highlights
     const cx = W * 0.5;
-    const cy = H * 0.52;
-    const pipeW = W * 0.72;
-    const pipeH = H * 0.16;
+    const cy = H * 0.53;
+    const pipeW = W * 0.74;
+    const pipeH = H * 0.165;
 
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.rotate(-0.18 + Math.sin(progress * Math.PI) * 0.05);
+    ctx.rotate(-0.17 + Math.sin(progress * Math.PI) * 0.045);
 
-    // Soft studio ground reflection
-    const glow = ctx.createRadialGradient(0, pipeH * 0.9, 10, 0, pipeH * 0.9, pipeW * 0.65);
-    glow.addColorStop(0, rimA + '55');
+    const glow = ctx.createRadialGradient(0, pipeH * 0.85, 10, 0, pipeH * 0.85, pipeW * 0.68);
+    glow.addColorStop(0, rimA + '60');
     glow.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = glow;
-    ctx.fillRect(-pipeW * 0.7, 0, pipeW * 1.4, pipeH * 1.8);
+    ctx.fillRect(-pipeW * 0.72, 0, pipeW * 1.44, pipeH * 1.9);
 
-    // Metallic cylinder gradient with moving specular reflection band
     const sweep = -0.35 + progress * 0.7;
     const bodyGrad = ctx.createLinearGradient(0, -pipeH / 2, 0, pipeH / 2);
-    bodyGrad.addColorStop(0.0, '#0B1320');
-    bodyGrad.addColorStop(Math.max(0.08, 0.22 + sweep * 0.15), rimA);
-    bodyGrad.addColorStop(Math.max(0.18, 0.36 + sweep * 0.12), '#FFFFFF');
-    bodyGrad.addColorStop(0.55, '#475569');
-    bodyGrad.addColorStop(0.82, '#1E293B');
-    bodyGrad.addColorStop(0.95, rimA);
-    bodyGrad.addColorStop(1.0, '#05080F');
+    bodyGrad.addColorStop(0.0, '#070E19');
+    bodyGrad.addColorStop(Math.max(0.07, 0.20 + sweep * 0.14), rimA);
+    bodyGrad.addColorStop(Math.max(0.16, 0.34 + sweep * 0.12), '#FFFFFF');
+    bodyGrad.addColorStop(0.54, '#475569');
+    bodyGrad.addColorStop(0.80, '#1E293B');
+    bodyGrad.addColorStop(0.94, rimA);
+    bodyGrad.addColorStop(1.0, '#04070E');
 
     ctx.fillStyle = bodyGrad;
     ctx.fillRect(-pipeW / 2, -pipeH / 2, pipeW, pipeH);
 
-    // Subtle brushed steel horizontal micro-grooves
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
     ctx.lineWidth = 1;
-    for (let y = -pipeH / 2 + 6; y < pipeH / 2; y += 6) {
+    for (let y = -pipeH / 2 + 5; y < pipeH / 2; y += 5) {
       ctx.beginPath();
       ctx.moveTo(-pipeW / 2, y);
       ctx.lineTo(pipeW / 2, y);
       ctx.stroke();
     }
 
-    // Cross-section hollow bore showing realistic steel wall thickness
-    const rx = pipeH * 0.24;
+    const rx = pipeH * 0.25;
     const ry = pipeH * 0.5;
     ctx.beginPath();
     ctx.ellipse(pipeW / 2, 0, rx, ry, 0, 0, Math.PI * 2);
@@ -317,7 +332,7 @@ export function buildHyperFramesHtmlDocument(params: {
     ctx.fillStyle = '#03060C';
     ctx.fill();
     ctx.lineWidth = 3;
-    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
     ctx.stroke();
 
     ctx.restore();
@@ -327,35 +342,56 @@ export function buildHyperFramesHtmlDocument(params: {
     const t = totalFrames > 1 ? frame / (totalFrames - 1) : 0;
     const sec = t * ${params.spec.duration_sec};
 
-    // 1. Controlled smooth camera rig motion
-    let scale = 1.02 + t * 0.085;
+    // 1. 3D Perspective Camera Rig Motion (smooth cinematic dolly + parallax tilt)
+    let scale = 1.03 + t * 0.085;
     let tx = 0;
     let ty = 0;
+    let rx = Math.sin(t * Math.PI) * 1.1;
+    let ry = (-0.5 + t) * 2.2;
     if (cameraMotion === 'pan') {
-      scale = 1.08;
-      tx = (-0.025 + t * 0.05) * W;
+      scale = 1.085;
+      tx = (-0.028 + t * 0.056) * W;
       ty = Math.sin(t * Math.PI) * -10;
+      ry = (-1.4 + t * 2.8);
     } else if (cameraMotion === 'orbit') {
-      scale = 1.06 + Math.sin(t * Math.PI) * 0.04;
-      tx = Math.sin(t * Math.PI * 1.2) * 28;
-      ty = Math.cos(t * Math.PI) * 14;
+      scale = 1.07 + Math.sin(t * Math.PI) * 0.04;
+      tx = Math.sin(t * Math.PI * 1.2) * 26;
+      ty = Math.cos(t * Math.PI) * 12;
+      ry = Math.sin(t * Math.PI) * 3.0;
     } else if (cameraMotion === 'static') {
-      scale = 1.01 + t * 0.025;
+      scale = 1.02 + t * 0.03;
+      ry = (-0.4 + t * 0.8);
     }
-    rig.style.transform = 'translate3d(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) + 'px,0) scale(' + scale.toFixed(4) + ')';
+    rig.style.transform =
+      'perspective(1400px) rotateX(' + rx.toFixed(2) + 'deg) rotateY(' + ry.toFixed(2) + 'deg) ' +
+      'translate3d(' + tx.toFixed(2) + 'px,' + ty.toFixed(2) + 'px,0) scale(' + scale.toFixed(4) + ')';
 
-    // 2. Canvas atmospheric volumetric light beams + procedural steel pipe (when no photo) + floating particles
+    // Optical shot-entry rim flare in first 0.28s
+    if (entryFlare) {
+      const flare = sec < 0.28 ? Math.sin((sec / 0.28) * Math.PI) * 0.34 : 0;
+      entryFlare.style.opacity = flare.toFixed(3);
+    }
+
+    // 2. Canvas atmospheric anamorphic rim-light beam sweep + floating particles
     ctx.clearRect(0, 0, W, H);
 
-    // Cool blue / crisp white diagonal studio rim light beams
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
-    const beamX = W * (0.2 + t * 0.6);
-    const beamGrad = ctx.createRadialGradient(beamX, H * 0.22, 10, beamX, H * 0.35, W * 0.72);
-    beamGrad.addColorStop(0, rimA + '38');
-    beamGrad.addColorStop(0.45, rimB + '16');
+    const beamX = W * (0.14 + t * 0.72);
+    const beamGrad = ctx.createRadialGradient(beamX, H * 0.26, 12, beamX, H * 0.42, W * 0.76);
+    beamGrad.addColorStop(0, rimA + '42');
+    beamGrad.addColorStop(0.42, rimB + '1A');
     beamGrad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = beamGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle diagonal anamorphic light streak
+    const streakX = -W * 0.3 + t * W * 1.6;
+    const streakGrad = ctx.createLinearGradient(streakX - 140, 0, streakX + 140, H);
+    streakGrad.addColorStop(0, 'rgba(255,255,255,0)');
+    streakGrad.addColorStop(0.5, rimB + '18');
+    streakGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = streakGrad;
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
 
@@ -363,7 +399,6 @@ export function buildHyperFramesHtmlDocument(params: {
       drawProceduralSteelPipe(t);
     }
 
-    // Subtle floating dust / metallic spark particles
     ctx.save();
     ctx.globalCompositeOperation = 'screen';
     for (const p of particles) {
@@ -373,30 +408,32 @@ export function buildHyperFramesHtmlDocument(params: {
       ctx.beginPath();
       ctx.arc(px, py, p.r, 0, Math.PI * 2);
       ctx.fillStyle = p.warm ? rimB : rimA;
-      ctx.globalAlpha = p.alpha * pulse * 0.72;
-      ctx.shadowBlur = p.r * 4;
+      ctx.globalAlpha = p.alpha * pulse * 0.74;
+      ctx.shadowBlur = p.r * 4.2;
       ctx.shadowColor = p.warm ? rimB : rimA;
       ctx.fill();
     }
     ctx.restore();
 
-    // 3. Kinetic typography entrance (modern, crisp, non-intrusive)
-    const kickerIn = easeOutCubic(sec / 0.45);
-    const headIn = easeOutCubic((sec - 0.14) / 0.55);
-    const outFade = sec > ${Math.max(1.2, params.spec.duration_sec - 0.45)}
-      ? Math.max(0, 1 - (sec - ${Math.max(1.2, params.spec.duration_sec - 0.45)}) / 0.4)
+    // 3. Kinetic upper-safe-zone hook typography (expo ease + subtle overshoot rebound)
+    const lineIn = easeOutExpo(sec / 0.38);
+    const headIn = easeOutBack((sec - 0.1) / 0.46);
+    const outFade = sec > ${Math.max(1.2, params.spec.duration_sec - 0.4)}
+      ? Math.max(0, 1 - (sec - ${Math.max(1.2, params.spec.duration_sec - 0.4)}) / 0.36)
       : 1;
 
-    if (kicker) {
-      kicker.style.opacity = (kickerIn * outFade).toFixed(3);
-      kicker.style.transform = 'translateY(' + ((1 - kickerIn) * 18).toFixed(1) + 'px)';
+    if (accentLine) {
+      accentLine.style.opacity = (lineIn * outFade).toFixed(3);
+      accentLine.style.transform = 'scaleX(' + (0.2 + lineIn * 0.8).toFixed(3) + ')';
+    }
+    if (bentoTag) {
+      bentoTag.style.opacity = (lineIn * outFade).toFixed(3);
+      bentoTag.style.transform = 'translateY(' + ((1 - lineIn) * 14).toFixed(1) + 'px)';
     }
     if (headline) {
-      headline.style.opacity = (headIn * outFade).toFixed(3);
-      headline.style.transform = 'translateY(' + ((1 - headIn) * 26).toFixed(1) + 'px) scale(' + (0.95 + headIn * 0.05).toFixed(4) + ')';
-    }
-    if (specFill) {
-      specFill.style.width = (t * 100).toFixed(1) + '%';
+      const op = Math.min(1, Math.max(0, (sec - 0.1) / 0.25)) * outFade;
+      headline.style.opacity = op.toFixed(3);
+      headline.style.transform = 'translateY(' + ((1 - headIn) * 24).toFixed(1) + 'px) scale(' + (0.94 + headIn * 0.06).toFixed(4) + ')';
     }
     return { frame, progress: t, lightingHint };
   };

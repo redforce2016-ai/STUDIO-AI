@@ -26,6 +26,7 @@ import { StageVoiceover } from "./components/StageVoiceover";
 import { ToolchainAndColabView } from "./components/ToolchainAndColabView";
 import {
   deleteProjectFromFirestore,
+  getGoogleDriveAccessToken,
   signInWithGoogle,
   signOutUser,
   subscribeAuthState,
@@ -593,9 +594,14 @@ export default function App() {
     setIsRunning(true);
     setErrorBanner(null);
     try {
+      const driveToken = getGoogleDriveAccessToken();
+      const resumeHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (driveToken) {
+        resumeHeaders["Authorization"] = `Bearer ${driveToken}`;
+      }
       const res = await fetch(`/api/projects/${activeProject.id}/resume`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: resumeHeaders,
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -708,9 +714,14 @@ export default function App() {
     if (!activeProject) return;
     setErrorBanner(null);
     try {
+      const renderDriveToken = getGoogleDriveAccessToken();
+      const renderHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (renderDriveToken) {
+        renderHeaders["Authorization"] = `Bearer ${renderDriveToken}`;
+      }
       const res = await fetch(`/api/projects/${activeProject.id}/video/render`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: renderHeaders,
         body: JSON.stringify(opts),
       });
       const data = await res.json();

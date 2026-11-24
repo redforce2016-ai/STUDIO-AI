@@ -25,6 +25,7 @@ import {
   runVisualProducerBatch,
   runVoiceoverAgent,
 } from "./gemini.js";
+import { ensureColabGpuRuntimeReady } from "./colabCli.js";
 import { saveProject } from "./store.js";
 
 function logEntry(node: string, event: GraphLogEntry["event"], message: string): GraphLogEntry {
@@ -270,6 +271,19 @@ async function videoShotsNode(state: StudioGraphState) {
     };
   }
 
+  // Automatically check/wake Google Colab CLI GPU runtime once Stage 2 Storyboard is approved
+  const colabAuto = await ensureColabGpuRuntimeReady({
+    reason: "storyboard_approved",
+    projectId: state.projectId,
+    projectTitle: state.brief.title,
+  }).catch(() => null);
+
+  const colabStatusNote = colabAuto?.ready
+    ? ` · Google Colab GPU (${colabAuto.gpuModel || "NVIDIA"}) متصل و آماده`
+    : colabAuto?.driveNotebook
+      ? ` · نوتبوک آماده در Google Colab Drive ساخته شد`
+      : "";
+
   return {
     currentStage: "video_shots" as PipelineStage,
     visuals: updatedVisuals,
@@ -278,7 +292,7 @@ async function videoShotsNode(state: StudioGraphState) {
       logEntry(
         "video_shots",
         "node_completed",
-        `مرحله ۳ (ساخت شات‌های ویدیو): ${state.director.shots.length} شات آماده رندر ویدیویی (لوکال ComfyUI/Parallax، مرورگر ایجنت Veo 2/Omni و صحنه سه‌بعدی) شد.`
+        `مرحله ۳ (ساخت شات‌های ویدیو): ${state.director.shots.length} شات آماده رندر ویدیویی (Colab CLI GPU / ComfyUI / Blender / HyperFrames)${colabStatusNote}.`
       ),
     ],
   };

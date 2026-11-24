@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Archive,
   CheckCircle2,
+  ChevronDown,
   Clapperboard,
   Code2,
   Download,
@@ -130,6 +131,8 @@ export function StageAssembly({
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const [downloadPercent, setDownloadPercent] = useState<number>(0);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [showProNleExports, setShowProNleExports] = useState(false);
 
   const handleReliableDownload = async (
     key: string,
@@ -227,26 +230,41 @@ export function StageAssembly({
             <Archive className="h-3.5 w-3.5" />
             <span>دانلود یکجای همه خروجی‌ها (.ZIP)</span>
           </a>
+          <button
+            type="button"
+            onClick={() => setShowProNleExports((v) => !v)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#14171F] px-3.5 py-2 text-xs font-medium text-slate-300 transition-colors hover:bg-[#1B1F2A] whitespace-nowrap shrink-0"
+          >
+            <Layers className="h-3.5 w-3.5 text-sky-400" />
+            <span>خروجی‌های تدوینگر حرفه‌ای</span>
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showProNleExports ? "rotate-180" : ""}`} />
+          </button>
+        </div>
+      </div>
+
+      {showProNleExports && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#262B38] bg-[#14171F] px-4 py-3">
+          <span className="text-[11px] font-semibold text-slate-400 ml-2">فایل‌های پروژه NLE:</span>
           <a
             href={`/api/projects/${project.id}/export/davinci-fcpxml`}
             download={`${project.id}_davinci_timeline.fcpxml`}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3.5 py-2 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
           >
             <Layers className="h-3.5 w-3.5" />
-            <span>تایم‌لاین (.fcpxml)</span>
+            <span>DaVinci (.fcpxml)</span>
           </a>
           <a
             href={videoProduction?.otioUrl || `/api/projects/${project.id}/export/davinci-otio`}
             download={`${project.id}_timeline.otio`}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3.5 py-2 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-300 transition-colors hover:bg-sky-500/20 whitespace-nowrap shrink-0"
           >
             <Layers className="h-3.5 w-3.5" />
-            <span>تایم‌لاین (.otio)</span>
+            <span>OpenTimelineIO (.otio)</span>
           </a>
           <a
             href={videoProduction?.cubeLutUrl || `/api/projects/${project.id}/export/cinema-lut?preset=${colorGradePreset}`}
             download={`${project.id}_cinema_grade.cube`}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20 whitespace-nowrap shrink-0"
           >
             <Code2 className="h-3.5 w-3.5" />
             <span>LUT رنگی (.cube)</span>
@@ -254,7 +272,7 @@ export function StageAssembly({
           <a
             href={videoProduction?.afterEffectsJsxUrl || `/api/projects/${project.id}/export/after-effects-jsx`}
             download={`${project.id}_after_effects_builder.jsx`}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-500/10 px-3.5 py-2 text-xs font-semibold text-purple-300 transition-colors hover:bg-purple-500/20 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-500/10 px-3 py-1.5 text-xs font-semibold text-purple-300 transition-colors hover:bg-purple-500/20 whitespace-nowrap shrink-0"
           >
             <Code2 className="h-3.5 w-3.5" />
             <span>After Effects (.jsx)</span>
@@ -262,55 +280,59 @@ export function StageAssembly({
           <button
             type="button"
             onClick={onExportBible}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#14171F] px-3.5 py-2 text-xs font-medium text-slate-200 transition-colors hover:bg-[#1B1F2A] whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:bg-[#1B1F2A] whitespace-nowrap shrink-0"
           >
             <Download className="h-3.5 w-3.5 text-amber-400" />
             <span>خروجی متنی پروژه (MD)</span>
           </button>
         </div>
-      </div>
+      )}
 
       {/* Render & Mixing Controls */}
       <section className="rounded-xl border border-[#262B38] bg-[#14171F] p-5 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#262B38] pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">
             <h3 className="flex items-center gap-2 text-sm font-bold text-slate-100">
               <Clapperboard className="h-4 w-4 text-amber-400" />
-              <span>تنظیمات تدوین، میکس صدا و رندر MP4</span>
+              <span>ساخت و خروجی نهایی ویدیو (تنظیم خودکار بهترین کیفیت)</span>
             </h3>
-            {preflight && (
-              <p className="text-xs text-slate-400">
-                موتورهای رایگان: HyperFrames ✓ · Remotion v4{" "}
-                {preflight.remotionAvailable ? "✓" : "✕"} · FFmpeg ASS + فونت Vazirmatn/Lalezar{" "}
-                {preflight.ffmpegAvailable ? "✓" : "✕"} · ComfyUI/Blender Colab{" "}
-                {preflight.comfyuiAvailable
-                  ? "آنلاین ✓"
-                  : "آفلاین (اجرای خودکار روی HyperFrames / Remotion)"}{" "}
-                · سیاست OmniFlash: قفل خاموش پیش‌فرض
-              </p>
-            )}
+            <p className="text-xs text-slate-400">
+              پریست خودکار فعال: فرمت {aspectRatio} · کیفیت {qualityMode === "final_1080p" ? "1080p سینمایی" : "480p سریع"} · اصلاح رنگ سینمایی · زیرنویس فارسی همگام با صدا · میکس تراز ‎-14 LUFS
+            </p>
           </div>
 
-          <button
-            type="button"
-            disabled={isVideoRunning || isRunning || preflight?.ready === false}
-            onClick={() => void handleLaunchAssembly()}
-            className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2.5 text-xs font-bold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <Film
-              className={`h-4 w-4 ${isVideoRunning ? "animate-pulse" : ""}`}
-            />
-            <span>
-              {isVideoRunning
-                ? "در حال تدوین، میکس و رندر نهایی..."
-                : videoProduction
-                  ? "مونتاژ و رندر مجدد ویدیوی نهایی MP4"
-                  : "شروع تدوین، میکس صدا و رندر نهایی MP4"}
-            </span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAdvancedSettings((v) => !v)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#262B38] bg-[#0B0D11] px-3.5 py-2.5 text-xs font-medium text-slate-300 hover:border-slate-500 whitespace-nowrap shrink-0"
+            >
+              <span>{showAdvancedSettings ? "بستن تنظیمات" : "تنظیمات پیشرفته (اختیاری)"}</span>
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvancedSettings ? "rotate-180" : ""}`} />
+            </button>
+
+            <button
+              type="button"
+              disabled={isVideoRunning || isRunning || preflight?.ready === false}
+              onClick={() => void handleLaunchAssembly()}
+              className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2.5 text-xs font-bold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Film
+                className={`h-4 w-4 ${isVideoRunning ? "animate-pulse" : ""}`}
+              />
+              <span>
+                {isVideoRunning
+                  ? "در حال تدوین، میکس و رندر نهایی..."
+                  : videoProduction
+                    ? "مونتاژ و رندر مجدد ویدیوی نهایی MP4"
+                    : "شروع تدوین، میکس صدا و رندر نهایی MP4"}
+              </span>
+            </button>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {showAdvancedSettings && (
+        <div className="grid grid-cols-1 gap-4 border-t border-[#262B38] pt-4 md:grid-cols-3">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-300">
               نسبت تصویر خروجی
@@ -428,6 +450,7 @@ export function StageAssembly({
             <span>میکس صدا + صدای محیط شات‌ها + Ducking (-14 LUFS)</span>
           </label>
         </div>
+        )}
 
         {preflight && !preflight.ready && (
           <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-300">

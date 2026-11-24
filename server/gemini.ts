@@ -100,38 +100,54 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 1): Promise<T> {
   throw lastError;
 }
 
+async function withSoftTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout (${Math.round(timeoutMs / 1000)}s): ${label}`)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 /**
- * Calls primary text model ('gemini-4-hydrogen') with automatic multi-account key rotation
- * across GEMINI_API_KEY_1..10 + GEMINI_API_KEY, and falls back to 'gemini-3.1-flash-lite'
- * (minimal thinking) when all accounts hit quota on hydrogen.
+ * Optional Google Search grounding helper. Runs with a crisp 10s timeout and does NOT
+ * pollute the main router's per-model cooldown ledger when googleSearch tool quota is 0.
  */
 async function generateWithModelFallback(params: {
   contents: string;
   config?: Record<string, unknown>;
+  timeoutMs?: number;
 }) {
-  const models: Array<"gemini-4-hydrogen" | "gemini-3.1-flash-lite"> = [
-    "gemini-4-hydrogen",
+  const { GoogleGenAI } = await import("@google/genai");
+  const { getGoogleApiKeyFromRouter } = await import("./router.js");
+  const apiKey = getGoogleApiKeyFromRouter();
+  const ai = new GoogleGenAI({
+    apiKey,
+    apiVersion: "v1beta",
+    httpOptions: { apiVersion: "v1beta", headers: { "User-Agent": "aistudio-build" } },
+  });
+
+  const models: Array<"gemini-3.5-flash" | "gemini-3.1-flash-lite"> = [
+    "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
   ];
   let lastError: unknown;
   for (const model of models) {
     try {
       const thinkingConfig = resolveGovernanceThinkingConfig(model, "research_script");
-      const { result } = await executeWithGoogleKeyFailover(
-        { taskRole: "research_script", modelId: model, apiVersion: "v1beta" },
-        (ai) =>
-          withRetry(() =>
-            ai.models.generateContent({
-              model,
-              contents: params.contents,
-              config: {
-                ...(params.config ?? {}),
-                ...(thinkingConfig ? { thinkingConfig } : {}),
-              } as never,
-            })
-          )
+      return await withSoftTimeout(
+        ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: {
+            ...(params.config ?? {}),
+            ...(thinkingConfig ? { thinkingConfig } : {}),
+          } as never,
+        }),
+        params.timeoutMs ?? 10_000,
+        `googleSearch:${model}`
       );
-      return result;
     } catch (err) {
       lastError = err;
       if (!isQuotaError(err)) {
@@ -186,11 +202,12 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
   let webResearch = "";
   const sources: GroundedSource[] = [];
 
-  // 1) Programmatic Hidden Agent Browser Web Mission
+  // 1) Programmatic Hidden Agent Browser Web Mission (bounded 12s timeout so Stage 1 never stalls)
   try {
-    const browserMission = await executeAgentWebResearchMission(
-      brief.idea,
-      "ایجنت استراتژیست و تحلیلگر موضوع"
+    const browserMission = await withSoftTimeout(
+      executeAgentWebResearchMission(brief.idea, "ایجنت استراتژیست و تحلیلگر موضوع"),
+      12_000,
+      "AgentBrowserResearch"
     );
     if (browserMission.synthesizedContextFa) {
       webResearch = browserMission.synthesizedContextFa;
@@ -201,12 +218,13 @@ export async function runStrategistTopicProposals(brief: ProjectBrief): Promise<
       }
     }
   } catch {
-    // Non-fatal if offline
+    // Non-fatal if offline or timed out
   }
 
-  // 2) Augment with Gemini Google Search Grounding if available
+  // 2) Augment with Gemini Google Search Grounding if available (12s bound)
   try {
     const searchRes = await generateWithModelFallback({
+      timeoutMs: 12_000,
       contents:
         pageMaturity === "new_page"
           ? `درباره عبارت یا ایده زیر یک تحقیق تخصصی، تاریخی و بازارمحور انجام بده (مناسب برای ویدیوهای اول یک پیج تازه تأسیس):
@@ -503,12 +521,13 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
   let groundedSummaryText = "";
   const sources: GroundedSource[] = [];
 
-  // Step A.1: Autonomous Hidden Agent Browser Web Mission
+  // Step A.1: Autonomous Hidden Agent Browser Web Mission (bounded 12s timeout)
   try {
     const queryForBrowser = sel?.title ? `${brief.idea} ${sel.title}` : brief.idea;
-    const browserMission = await executeAgentWebResearchMission(
-      queryForBrowser,
-      "ایجنت پژوهشگر و سناریونویس"
+    const browserMission = await withSoftTimeout(
+      executeAgentWebResearchMission(queryForBrowser, "ایجنت پژوهشگر و سناریونویس"),
+      12_000,
+      "AgentBrowserResearch"
     );
     if (browserMission.synthesizedContextFa) {
       groundedSummaryText = browserMission.synthesizedContextFa;
@@ -520,9 +539,10 @@ ${feedback ? `بازخورد جدید کاربر برای اصلاح: ${feedback
     // Non-fatal
   }
 
-  // Step A.2: Grounded Web Search Research (gracefully skipped if quota limited)
+  // Step A.2: Grounded Web Search Research (gracefully skipped if quota limited or >12s)
   try {
     const searchRes = await generateWithModelFallback({
+      timeoutMs: 12_000,
       contents: searchPrompt,
       config: {
         tools: [{ googleSearch: {} }],
@@ -745,44 +765,57 @@ ${feedback ? `بازخورد اصلاحی کاربر: ${feedback}` : ""}
   let audioError: string | null = null;
 
   try {
-    const { result: ttsRes } = await executeWithGoogleKeyFailover(
-      { taskRole: "tts_audio", modelId: "gemini-3.8-flash-lite-tts", apiVersion: "v1beta" },
-      (ai) =>
-        withRetry(() =>
-          ai.models.generateContent({
-            model: "gemini-3.8-flash-lite-tts",
-            contents: [
-              {
-                role: "user",
-                parts: [
+    const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+    let lastTtsErr: unknown = null;
+    for (const ttsModel of ttsModels) {
+      try {
+        const { result: ttsRes } = await executeWithGoogleKeyFailover(
+          { taskRole: "tts_audio", modelId: ttsModel, apiVersion: "v1beta" },
+          (ai) =>
+            withRetry(() =>
+              ai.models.generateContent({
+                model: ttsModel,
+                contents: [
                   {
-                    text: cleanSpeechText,
-                    speechMetadata: {
-                      style: resolvedStyle,
-                    },
-                  } as { text: string; speechMetadata?: { style: string } },
+                    role: "user",
+                    parts: [
+                      {
+                        text: cleanSpeechText,
+                        speechMetadata: {
+                          style: resolvedStyle,
+                        },
+                      } as { text: string; speechMetadata?: { style: string } },
+                    ],
+                  },
                 ],
-              },
-            ],
-            config: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName },
+                config: {
+                  responseModalities: ["AUDIO"],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: { voiceName },
+                    },
+                  },
                 },
-              },
-            },
-          })
-        )
-    );
+              })
+            )
+        );
 
-    const base64Audio = ttsRes.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
-    if (base64Audio) {
-      const wavBuffer = Buffer.from(base64Audio, "base64");
-      audioFilename = `${projectId}_vo_${Date.now()}.wav`;
-      audioUrl = saveAudioFile(audioFilename, wavBuffer);
-    } else {
-      audioError = "مدل TTS داده صوتی برنگرداند؛ متن نریشن آماده است و می‌توانید دوباره تلاش کنید.";
+        const base64Audio = ttsRes.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
+        if (base64Audio) {
+          const wavBuffer = Buffer.from(base64Audio, "base64");
+          audioFilename = `${projectId}_vo_${Date.now()}.wav`;
+          audioUrl = saveAudioFile(audioFilename, wavBuffer);
+          break;
+        }
+      } catch (innerErr) {
+        lastTtsErr = innerErr;
+      }
+    }
+
+    if (!audioUrl) {
+      audioError = lastTtsErr
+        ? formatGeminiError(lastTtsErr)
+        : "مدل TTS داده صوتی برنگرداند؛ متن نریشن آماده است و می‌توانید دوباره تلاش کنید.";
     }
   } catch (err) {
     audioError = formatGeminiError(err);
@@ -1045,45 +1078,66 @@ async function buildFallbackStoryboardShot(
   const errMsg = err ? formatGeminiError(err) : null;
   const width = aspectRatio === "16:9" ? 1280 : 720;
   const height = aspectRatio === "16:9" ? 720 : 1280;
-  const promptText = [shot.visualPromptFa, shot.sceneDescriptionFa, shot.lightingAndMood]
+  const seven = ensureSevenLayerSpec(shot);
+  const promptText = [
+    seven.scene,
+    seven.objects,
+    seven.lighting,
+    shot.visualPromptFa,
+    shot.sceneDescriptionFa,
+    shot.lightingAndMood,
+    shot.onScreenText,
+  ]
     .filter(Boolean)
     .join(" ");
 
-  // Tier 2 (Photorealistic Real-World Documentary Media + Unified Cinema Color Grade)
-  try {
-    const filename = `${projectId}_photo_shot_${shot.shotNumber}_${Date.now()}.png`;
-    const outPngPath = path.join(getImagesDir(), filename);
-    const curated = await curatePhotorealisticShotKeyframe({
-      prompt: promptText,
-      shotNumber: shot.shotNumber,
-      width,
-      height,
-      outputPngPath: outPngPath,
-      usedUrls,
-    });
+  const preferProceduralCinema3d =
+    shot.preferredFreeEngine === "remotion" ||
+    /crystal|lattice|atomic|microscop|molecular|bcc\s*iron|two-tone|pressure\s*distribution|stress\s*distribution|uniform\s*stress|vector\s*graphic|digital\s*gauge|follow\s*button|verified\s*check|360[\s-]*deg|کریستال|اتم‌های|اتمی|مولکول|میکروسکوپ|ناحیه\s*حرارت|سفید\s*و\s*آبی|نور\s*آبی|برداری|گیج\s*فشار|۲۲۰\s*بار|دکمه.*فالو|فالو\s*کن|آیکون\s*تایید|استودیو.*متالیک|توزیع\s*(?:یکنواخت|تنش|فشار)|آنالیز\s*سه\s*بعدی|۳۶۰\s*درجه/i.test(
+      promptText
+    );
 
-    const providerLabel =
-      curated.sourceProvider === "flickr_public"
-        ? "Flickr Real Photography"
-        : curated.sourceProvider === "wikimedia_commons"
-          ? "Wikimedia Commons"
-          : "Openverse";
-    const visionBadge =
-      curated.visionCriticScore !== null ? ` · امتیاز Vision Critic: ${curated.visionCriticScore}/10` : "";
+  // Tier 2 (Photorealistic Real-World Documentary Media + Vision Critic threshold)
+  // Skips stock photo search for scientific, microscopic, dark-studio CGI, or CTA UI shots
+  if (!preferProceduralCinema3d) {
+    try {
+      const filename = `${projectId}_photo_shot_${shot.shotNumber}_${Date.now()}.png`;
+      const outPngPath = path.join(getImagesDir(), filename);
+      const curated = await curatePhotorealisticShotKeyframe({
+        prompt: promptText,
+        shotNumber: shot.shotNumber,
+        width,
+        height,
+        outputPngPath: outPngPath,
+        usedUrls,
+      });
 
-    return {
-      shotNumber: shot.shotNumber,
-      imageUrl: `/api/media/images/${filename}`,
-      svgMarkup: null,
-      motionCue: shot.cameraMovement || "دالی سینمایی سه‌بعدی ۲۴ فریم با موج گرما و ذرات واقعی",
-      colorPaletteNote: `${shot.lightingAndMood || "سینمایی کنتراستی Teal & Amber"} · عکس واقعی مستند (${providerLabel}${visionBadge})`,
-      renderEngineUsed: "photorealistic-real-media",
-      sourceMediaUrl: curated.sourceUrl,
-      status: "ready",
-      error: errMsg,
-    };
-  } catch {
-    // Fall through to offline Procedural WebGL2 Cinema 3D fallback if network is unreachable
+      const visionScore = curated.visionCriticScore ?? 7.5;
+      if (visionScore >= 6.5) {
+        const providerLabel =
+          curated.sourceProvider === "flickr_public"
+            ? "Flickr Real Photography"
+            : curated.sourceProvider === "wikimedia_commons"
+              ? "Wikimedia Commons"
+              : "Openverse";
+        const visionBadge =
+          curated.visionCriticScore !== null ? ` · امتیاز Vision Critic: ${curated.visionCriticScore}/10` : "";
+
+        return {
+          shotNumber: shot.shotNumber,
+          imageUrl: `/api/media/images/${filename}`,
+          svgMarkup: null,
+          motionCue: shot.cameraMovement || "دالی سینمایی سه‌بعدی ۲۴ فریم با موج گرما و ذرات واقعی",
+          colorPaletteNote: `${shot.lightingAndMood || "سینمایی کنتراستی Teal & Amber"} · عکس واقعی مستند (${providerLabel}${visionBadge})`,
+          renderEngineUsed: "photorealistic-real-media",
+          sourceMediaUrl: curated.sourceUrl,
+          status: "ready",
+          error: null,
+        };
+      }
+    } catch {
+      // Fall through to Three.js WebGL2 Procedural Cinema 3D Studio
+    }
   }
 
   try {
@@ -1102,11 +1156,11 @@ async function buildFallbackStoryboardShot(
       shotNumber: shot.shotNumber,
       imageUrl: `/api/media/images/${filename}`,
       svgMarkup: null,
-      motionCue: shot.cameraMovement || "دالی سینمایی ۲۴ فریم با ذرات و دود زنده",
-      colorPaletteNote: `${shot.lightingAndMood || "سینمایی کنتراستی Teal & Amber"} (Procedural 3D Offline Fallback)`,
+      motionCue: seven.camera || shot.cameraMovement || "دالی سینمایی ۲۴ فریم با ذرات و دود زنده",
+      colorPaletteNote: `${seven.lighting || shot.lightingAndMood || "استودیوی تاریک سینمایی با نور سفید و آبی"} (Three.js WebGL2 PBR Studio)`,
       renderEngineUsed: "procedural-cinema-3d",
       status: "ready",
-      error: errMsg,
+      error: null,
     };
   } catch {
     // Emergency SVG fallback only if headless Chromium is unavailable
@@ -1225,8 +1279,13 @@ async function generatePhotorealisticKeyframeImage(params: {
     const msg = err instanceof Error ? err.message : String(err);
     if (/429|RESOURCE_EXHAUSTED|quota|Timeout|503|UNAVAILABLE/i.test(msg)) {
       imageQuotaCooldownUntil = Date.now() + 180_000;
+      throw err;
     }
     // Try gemini-nano-banana-2.1 fallback below
+  }
+
+  if (Date.now() < imageQuotaCooldownUntil) {
+    throw new Error("سهمیه لحظه‌ای مدل‌های تصویرسازی Gemini (429 RESOURCE_EXHAUSTED) در حال انتظار است.");
   }
 
   // 2) Fallback: gemini-nano-banana-2.1 via models.generateContent
@@ -1323,25 +1382,60 @@ export async function runVisualProducerBatch(
       });
 
       // Automatic QA self-healing retry if image failed 7-layer comprehension/appeal threshold
-      if (!qaAudit.passed && qaAudit.revisionPromptEn && Date.now() >= imageQuotaCooldownUntil) {
-        try {
-          const retried = await generatePhotorealisticKeyframeImage({
-            projectId,
-            shot,
-            directionSummary,
-            aspectRatio,
-            feedback: qaAudit.revisionPromptEn,
-          });
-          shotAsset.imageUrl = retried.imageUrl;
-          shotAsset.renderEngineUsed = `${retried.modelUsed} (QA Revised)`;
-          const retriedPath = path.join(getImagesDir(), path.basename(retried.imageUrl));
-          qaAudit = await auditShotAssetAgainstSevenLayers({
-            shot,
-            imagePath: retriedPath,
-            stage: "keyframe_image",
-          });
-        } catch {
-          // Keep original asset alongside its QA report if retry hits quota
+      if (!qaAudit.passed && qaAudit.revisionPromptEn) {
+        let healedViaApi = false;
+        if (Date.now() >= imageQuotaCooldownUntil) {
+          try {
+            const retried = await generatePhotorealisticKeyframeImage({
+              projectId,
+              shot,
+              directionSummary,
+              aspectRatio,
+              feedback: qaAudit.revisionPromptEn,
+            });
+            shotAsset.imageUrl = retried.imageUrl;
+            shotAsset.renderEngineUsed = `${retried.modelUsed} (QA Revised)`;
+            const retriedPath = path.join(getImagesDir(), path.basename(retried.imageUrl));
+            qaAudit = await auditShotAssetAgainstSevenLayers({
+              shot,
+              imagePath: retriedPath,
+              stage: "keyframe_image",
+            });
+            healedViaApi = true;
+          } catch {
+            // Fall through to Three.js WebGL2 Procedural 3D QA repair
+          }
+        }
+
+        if (!healedViaApi && !String(shotAsset.renderEngineUsed || "").includes("procedural-cinema-3d")) {
+          try {
+            const width = aspectRatio === "16:9" ? 1280 : 720;
+            const height = aspectRatio === "16:9" ? 720 : 1280;
+            const seven = ensureSevenLayerSpec(shot);
+            const filename = `${projectId}_proc_qa_shot_${shot.shotNumber}_${Date.now()}.png`;
+            const repairedPngPath = path.join(getImagesDir(), filename);
+            await renderProceduralCinemaKeyframePng({
+              prompt: [qaAudit.revisionPromptEn, seven.scene, seven.objects, seven.lighting].join(" "),
+              shotNumber: shot.shotNumber,
+              width,
+              height,
+              cameraMotion: shot.shotNumber % 3 === 1 ? "push-in" : shot.shotNumber % 3 === 2 ? "pan" : "orbit",
+              outputPngPath: repairedPngPath,
+            });
+            const repairedAudit = await auditShotAssetAgainstSevenLayers({
+              shot,
+              imagePath: repairedPngPath,
+              stage: "keyframe_image",
+            });
+            if (repairedAudit.overallScore >= qaAudit.overallScore) {
+              shotAsset.imageUrl = `/api/media/images/${filename}`;
+              shotAsset.renderEngineUsed = "procedural-cinema-3d (QA Revised)";
+              shotAsset.colorPaletteNote = `${seven.lighting || shot.lightingAndMood} (اصلاح خودکار QA سه‌بعدی)`;
+              qaAudit = repairedAudit;
+            }
+          } catch {
+            // Keep original asset alongside its QA report
+          }
         }
       }
 

@@ -174,63 +174,72 @@ export async function auditShotAssetAgainstSevenLayers(params: {
 
 سخت‌گیر باش: اگر تصویر تار، بی‌کیفیت، بی‌ربط به موضوع صنعتی/لوله، دارای متن شکسته یا خارج از مشخصات کارگردان است، نمره زیر ۷ بده و در revisionPromptEn دستور انگلیسی دقیق برای بازتولید بهتر بنویس.`;
 
-    const modelName = "gemini-3.1-flash-lite";
-    const thinkingConfig = resolveGovernanceThinkingConfig(modelName, "visuals_qa");
-
-    const { result } = await executeWithGoogleKeyFailover(
-      { taskRole: "visuals_qa", modelId: modelName, apiVersion: "v1beta" },
-      (ai) =>
-        Promise.race([
-          ai.models.generateContent({
-            model: modelName,
-            contents: {
-              parts: [
-                { inlineData: { mimeType: ext, data: b64 } },
-                { text: prompt },
-              ] as never,
-            },
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  overallScore: { type: Type.NUMBER },
-                  userComprehensionScore: { type: Type.NUMBER },
-                  visualAppealScore: { type: Type.NUMBER },
-                  passed: { type: Type.BOOLEAN },
-                  summaryFa: { type: Type.STRING },
-                  revisionPromptEn: { type: Type.STRING },
-                  layerScores: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        layer: { type: Type.STRING },
-                        score: { type: Type.NUMBER },
-                        passed: { type: Type.BOOLEAN },
-                        noteFa: { type: Type.STRING },
-                      },
-                      required: ["layer", "score", "passed", "noteFa"],
-                    },
-                  },
+    let result: { text?: string } | null = null;
+    let lastQaErr: unknown = null;
+    for (const modelName of ["gemini-3.5-flash", "gemini-3.1-flash-lite"] as const) {
+      try {
+        const thinkingConfig = resolveGovernanceThinkingConfig(modelName, "visuals_qa");
+        const call = await executeWithGoogleKeyFailover(
+          { taskRole: "visuals_qa", modelId: modelName, apiVersion: "v1beta" },
+          (ai) =>
+            Promise.race([
+              ai.models.generateContent({
+                model: modelName,
+                contents: {
+                  parts: [
+                    { inlineData: { mimeType: ext, data: b64 } },
+                    { text: prompt },
+                  ] as never,
                 },
-                required: [
-                  "overallScore",
-                  "userComprehensionScore",
-                  "visualAppealScore",
-                  "passed",
-                  "summaryFa",
-                  "layerScores",
-                ],
-              } as never,
-              ...(thinkingConfig ? { thinkingConfig } : {}),
-            } as never,
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Shot 7-layer QA timeout (22s)")), 22_000)
-          ),
-        ])
-    );
+                config: {
+                  responseMimeType: "application/json",
+                  responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                      overallScore: { type: Type.NUMBER },
+                      userComprehensionScore: { type: Type.NUMBER },
+                      visualAppealScore: { type: Type.NUMBER },
+                      passed: { type: Type.BOOLEAN },
+                      summaryFa: { type: Type.STRING },
+                      revisionPromptEn: { type: Type.STRING },
+                      layerScores: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            layer: { type: Type.STRING },
+                            score: { type: Type.NUMBER },
+                            passed: { type: Type.BOOLEAN },
+                            noteFa: { type: Type.STRING },
+                          },
+                          required: ["layer", "score", "passed", "noteFa"],
+                        },
+                      },
+                    },
+                    required: [
+                      "overallScore",
+                      "userComprehensionScore",
+                      "visualAppealScore",
+                      "passed",
+                      "summaryFa",
+                      "layerScores",
+                    ],
+                  } as never,
+                  ...(thinkingConfig ? { thinkingConfig } : {}),
+                } as never,
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error("Shot 7-layer QA timeout (22s)")), 22_000)
+              ),
+            ])
+        );
+        result = call.result;
+        break;
+      } catch (err) {
+        lastQaErr = err;
+      }
+    }
+    if (!result) throw lastQaErr || new Error("Shot QA failed");
 
     const parsed = JSON.parse((result.text ?? "{}").trim()) as {
       overallScore?: number;

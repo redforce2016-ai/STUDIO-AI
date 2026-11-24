@@ -9,8 +9,10 @@ import type {
   ProjectRecord,
 } from "../src/types/studio.js";
 import type { CameraMotionKind, PalettePresetKind, ShotCompositionPlan, TransitionKind } from "../src/types/videoPipeline.js";
+import { getColabBridgeConfig } from "./colabBridge.js";
+import { ensureColabGpuRuntimeReady } from "./colabCli.js";
 import { getImagesDir } from "./store.js";
-import { isBlenderInstalled, renderBlenderShot } from "./video/providers/blender.js";
+import { isBlenderInstalled, isColabBlenderReady, renderBlenderShot } from "./video/providers/blender.js";
 import { renderRemotionShot } from "./video/providers/remotion.js";
 
 const execFileAsync = promisify(execFile);
@@ -911,7 +913,14 @@ export async function renderShotWithEngine(params: {
   }
 
   if (params.engineId === "blender_headless") {
-    if (isBlenderInstalled()) {
+    if (!isBlenderInstalled() && !isColabBlenderReady()) {
+      await ensureColabGpuRuntimeReady({
+        reason: "shot_render",
+        projectId: params.project.id,
+        projectTitle: params.project.brief.title,
+      }).catch(() => null);
+    }
+    if (isBlenderInstalled() || isColabBlenderReady()) {
       try {
         await renderBlenderShot({
           shotId: plan.shot_id,
@@ -941,12 +950,27 @@ export async function renderShotWithEngine(params: {
     return {
       outputPath: params.outputPath,
       engineUsed: "hyperframes_html",
-      fallbackNoteFa: "Blender روی این سرور نصب نیست؛ خروجی با HyperFrames HTML5 رندر شد.",
+      fallbackNoteFa: "Blender محلی یا Colab GPU در دسترس نبود؛ خروجی با HyperFrames HTML5 رندر شد.",
     };
   }
 
   if (params.engineId === "comfyui_light") {
-    const comfy = await probeComfyUiStatus();
+    let comfy = await probeComfyUiStatus();
+    if (!comfy.available) {
+      await ensureColabGpuRuntimeReady({
+        reason: "shot_render",
+        projectId: params.project.id,
+        projectTitle: params.project.brief.title,
+      }).catch(() => null);
+      const colabBridge = getColabBridgeConfig();
+      if (colabBridge.connected && colabBridge.lastHealth?.engines?.comfyui && colabBridge.bridgeUrl) {
+        comfy = {
+          available: true,
+          baseUrl: colabBridge.bridgeUrl,
+          note: `متصل به ComfyUI روی Google Colab GPU (${colabBridge.lastHealth.gpuModel || "NVIDIA"})`,
+        };
+      }
+    }
     if (comfy.available) {
       // If a ComfyUI server is reachable locally, regenerate photoreal dual frames via ComfyUI first
       const frames = await renderHyperFramesDualKeyframes({

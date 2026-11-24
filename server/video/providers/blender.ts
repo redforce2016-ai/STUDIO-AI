@@ -4,6 +4,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ShotSpec } from "../../../src/types/videoPipeline.js";
 import { executeRemoteColabBlenderRender, getColabBridgeConfig } from "../../colabBridge.js";
+import {
+  ensureColabGpuRuntimeReady,
+  executeDirectColabCliBlenderShot,
+} from "../../colabCli.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -264,20 +268,43 @@ export async function renderBlenderShot(params: {
   fs.mkdirSync(workDir, { recursive: true });
   const scriptPath = path.join(workDir, `${params.shotId}_scene.py`);
 
-  // 1. Prefer real Google Colab GPU Blender when connected and local Blender is absent
-  if (!isBlenderInstalled() && isColabBlenderReady()) {
+  // 1. Prefer real Google Colab GPU Blender when local Blender is absent (auto-wakes Colab CLI GPU if configured)
+  if (!isBlenderInstalled()) {
+    if (!isColabBlenderReady()) {
+      await ensureColabGpuRuntimeReady({ reason: "shot_render" }).catch(() => null);
+    }
+
+    if (isColabBlenderReady()) {
+      const remoteScript = buildBlenderSevenLayerPythonScript({
+        ...params,
+        outputPath: `/tmp/${params.shotId}_blender_out.mp4`,
+      });
+      fs.writeFileSync(scriptPath, remoteScript, "utf-8");
+      await executeRemoteColabBlenderRender({
+        shotId: params.shotId,
+        pythonScript: remoteScript,
+        outputPath: params.outputPath,
+        timeoutMs: params.timeoutMs ?? 240_000,
+      });
+      return { outputPath: params.outputPath, executionHost: "colab_gpu_blender" };
+    }
+
+    // 1b. Direct Colab CLI execution (`colab exec` + `colab download`) when CLI session is active without tunnel
     const remoteScript = buildBlenderSevenLayerPythonScript({
       ...params,
       outputPath: `/tmp/${params.shotId}_blender_out.mp4`,
     });
-    fs.writeFileSync(scriptPath, remoteScript, "utf-8");
-    await executeRemoteColabBlenderRender({
+    const directCli = await executeDirectColabCliBlenderShot({
       shotId: params.shotId,
       pythonScript: remoteScript,
-      outputPath: params.outputPath,
-      timeoutMs: params.timeoutMs ?? 240_000,
-    });
-    return { outputPath: params.outputPath, executionHost: "colab_gpu_blender" };
+      outputFilename: path.basename(params.outputPath),
+    }).catch(() => null);
+    if (directCli && fs.existsSync(directCli.outputPath)) {
+      if (path.resolve(directCli.outputPath) !== path.resolve(params.outputPath)) {
+        fs.copyFileSync(directCli.outputPath, params.outputPath);
+      }
+      return { outputPath: params.outputPath, executionHost: "colab_gpu_blender" };
+    }
   }
 
   // 2. Local Blender binary execution

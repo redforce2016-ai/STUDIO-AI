@@ -19,6 +19,7 @@ import type {
 import { getAudioDir, getImagesDir, getProject, getVideosDir, getVisualsDir } from "../store.js";
 import { getActiveRemoteComfyUrl } from "../cloudGpuNotebooks.js";
 import { getColabBridgeConfig } from "../colabBridge.js";
+import { ensureColabGpuRuntimeReady } from "../colabCli.js";
 import { extractDavinciClipsFromProject, generateOpenTimelineIoJson } from "../davinciResolveExport.js";
 import { generateAfterEffectsExtendScriptJsx } from "./afterEffectsExporter.js";
 import {
@@ -139,6 +140,7 @@ const ShotWorkerAnnotation = Annotation.Root({
   maxAttempts: Annotation<number>({ reducer: (_, n) => n, default: () => 3 }),
   humanInstruction: Annotation<string | undefined>({ reducer: (_, n) => n, default: () => undefined }),
   bypassCache: Annotation<boolean>({ reducer: (_, n) => n, default: () => false }),
+  burnSubtitles: Annotation<boolean>({ reducer: (_, n) => n, default: () => true }),
   shot: Annotation<ShotSpec>({ reducer: (_, n) => n }),
   attempt: Annotation<number>({ reducer: (_, n) => n, default: () => 0 }),
   priorIssues: Annotation<VisualCriticIssue[]>({ reducer: (_, n) => n, default: () => [] }),
@@ -187,7 +189,16 @@ async function builderNode(state: ShotWorkerState) {
       });
 
   const safety = validateCompositionPlanSafety(plan);
-  const safePlan = safety.valid ? plan : buildDeterministicCompositionFromShot(spec);
+  const rawSafePlan = safety.valid ? plan : buildDeterministicCompositionFromShot(spec);
+  // Avoid double-burning subtitles: when assembler burns audio-synced ASS kinetic captions across all shots,
+  // suppress Remotion's per-shot CaptionTrack card so there is never overlapping bottom text.
+  const safePlan: ShotCompositionPlan = state.burnSubtitles
+    ? {
+        ...rawSafePlan,
+        caption_text: undefined,
+        nodes: rawSafePlan.nodes.filter((n) => n.component !== "CaptionTrack"),
+      }
+    : rawSafePlan;
 
   updateShotInRun(state.runId, spec.shot_id, { compositionPlan: safePlan });
 
@@ -843,13 +854,21 @@ export function resolveFreeEngineRoute(params: {
 // Node 3: tool_router
 async function toolRouterNode(state: VideoPipelineState) {
   const cfg = getVideoConfig();
+  const projectRecord = state.projectId ? getProject(state.projectId) : null;
+  const needsColabGpu = state.shots.some((s) => s.tool === "blender" || s.tool === "comfyui");
+  if (needsColabGpu) {
+    await ensureColabGpuRuntimeReady({
+      reason: "shot_render",
+      projectId: state.projectId,
+      projectTitle: projectRecord?.brief?.title || null,
+    }).catch(() => null);
+  }
   const colabCfg = getColabBridgeConfig();
   const remoteComfyUrl =
     (colabCfg.connected && colabCfg.lastHealth?.engines?.comfyui ? colabCfg.bridgeUrl : null) ||
     getActiveRemoteComfyUrl();
   const localBlenderAvailable = isBlenderInstalled();
   const colabBlenderAvailable = isColabBlenderReady();
-  const projectRecord = state.projectId ? getProject(state.projectId) : null;
 
   const routed = state.shots.map((shot) => {
     let resolvedKeyframePath = shot.visual.keyframe_path;
@@ -933,6 +952,7 @@ async function shotWorkerNode(state: ShotWorkerState & { runId: string }) {
     maxAttempts: state.maxAttempts,
     humanInstruction: state.humanInstruction,
     bypassCache: state.bypassCache,
+    burnSubtitles: state.burnSubtitles,
     shot: state.shot,
     attempt: 0,
     priorIssues: [],
@@ -1158,6 +1178,7 @@ const videoPipelineWorkflow = new StateGraph(VideoPipelineAnnotation)
           qualityMode: s.qualityMode,
           maxAttempts: cfg.maxShotRetries,
           bypassCache: false,
+          burnSubtitles: s.burnSubtitles,
           shot,
           attempt: 0,
           priorIssues: [],

@@ -53,7 +53,7 @@ export function StageResearchScript({
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#262B38] pb-5">
         <div>
           <div className="flex items-center gap-2 text-xs text-amber-400">
-            <span>مرحله ۱ از ۶ · ایجنت ۱ (سناریونویس)</span>
+            <span>مرحله ۱ از ۵ · ایجنت ۱ (سناریونویس)</span>
             <span aria-hidden="true" className="text-slate-600">·</span>
             <span className="text-slate-400">
               {isCurrentGate ? "ایستگاه تایید انسانی سناریو" : "بازبینی و ویرایش"}
@@ -158,7 +158,7 @@ export function StageResearchScript({
           <div className="border-b border-[#262B38] pb-3">
             <h3 className="text-sm font-semibold text-slate-100">متن کامل سناریو (قابل ویرایش مستقیم)</h3>
             <p className="mt-1 text-xs text-slate-400">
-              پس از تایید شما، ایجنت ۱ متن دقیق گویندگی را با اعراب‌گذاری کامل فارسی آماده می‌کند.
+              پس از تایید شما، کارگردان ۷ لایه دکوپاژ کامل، کی‌فریم‌ها و ممیزی QA هر شات (مرحله ۲) را آماده می‌کند.
             </p>
           </div>
 
@@ -270,8 +270,8 @@ export function StageResearchScript({
           >
             <span>
               {isRunning
-                ? "در حال اعراب‌گذاری متن گویندگی..."
-                : "تایید سناریو و ساخت متن گویندگی"}
+                ? "در حال طراحی استوری‌بورد ۷ لایه و کی‌فریم‌ها..."
+                : "تایید سناریو و ساخت استوری‌بورد (مرحله ۲)"}
             </span>
             <ArrowLeft className="h-4 w-4" />
           </button>

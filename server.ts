@@ -39,6 +39,13 @@ import {
   getColabBridgeConfig,
   probeColabGpuBridge,
 } from "./server/colabBridge.js";
+import {
+  ensureColabGpuRuntimeReady,
+  getColabCliRuntimeStatus,
+  stopColabCliSession,
+  syncColabNotebookToGoogleDrive,
+  updateColabCliConfig,
+} from "./server/colabCli.js";
 import { generateAfterEffectsExtendScriptJsx } from "./server/video/afterEffectsExporter.js";
 import {
   createProject,
@@ -327,8 +334,11 @@ async function startServer() {
     if (ext === ".png") {
       return streamFileWithRangeAndDownload(req, res, fullPath, "image/png", baseName);
     }
-    if (ext === ".srt" || ext === ".cube") {
+    if (ext === ".srt" || ext === ".ass" || ext === ".cube") {
       return streamFileWithRangeAndDownload(req, res, fullPath, "text/plain; charset=utf-8", `${runId}_${baseName}`);
+    }
+    if (ext === ".jsx") {
+      return streamFileWithRangeAndDownload(req, res, fullPath, "application/javascript; charset=utf-8", `${runId}_${baseName}`);
     }
     if (ext === ".json" || ext === ".otio") {
       return streamFileWithRangeAndDownload(req, res, fullPath, "application/json; charset=utf-8", `${runId}_${baseName}`);
@@ -458,6 +468,20 @@ async function startServer() {
     if (!project) return res.status(404).json({ error: "پروژه یافت نشد." });
 
     try {
+      const authHeader = String(req.headers.authorization || "");
+      const driveToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+      const bodyAction = (req.body as { action?: string } | undefined)?.action;
+
+      // When user approves Stage 2 Storyboard, auto-create ready GPU notebook in their Google Drive + wake Colab CLI
+      if (project.currentStage === "storyboard" && bodyAction === "approve") {
+        void ensureColabGpuRuntimeReady({
+          reason: "storyboard_approved",
+          projectId: project.id,
+          projectTitle: project.brief.title,
+          googleDriveAccessToken: driveToken,
+        }).catch(() => null);
+      }
+
       saveProject({ ...project, checkpointStatus: "running", errorMessage: null });
       const updated = await resumePipeline(project, req.body);
       res.json({ project: updated });
@@ -721,6 +745,20 @@ async function startServer() {
         ],
       },
     });
+
+    // Auto-sync Drive Colab notebook + wake Colab CLI GPU when user has Google Drive token active
+    const renderAuthHeader = String(req.headers.authorization || "");
+    const renderDriveToken = renderAuthHeader.startsWith("Bearer ")
+      ? renderAuthHeader.slice(7).trim()
+      : null;
+    if (renderDriveToken) {
+      void ensureColabGpuRuntimeReady({
+        reason: "shot_render",
+        projectId: project.id,
+        projectTitle: project.brief.title,
+        googleDriveAccessToken: renderDriveToken,
+      }).catch(() => null);
+    }
 
     // Run pipeline in background so UI can poll live node-by-node status cleanly
     void runVideoProductionPipeline({
@@ -1719,6 +1757,124 @@ async function startServer() {
       `attachment; filename="content_studio_all_in_one_colab_gpu.ipynb"`
     );
     res.send(ipynb);
+  });
+
+  // ============================================================================
+  // Official Google Colab CLI (google-colab-cli) + Google Drive Auto-Notebook API
+  // ============================================================================
+  app.get("/api/colab/cli/status", async (_req, res) => {
+    try {
+      const status = await getColabCliRuntimeStatus();
+      res.json({ cliStatus: status });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : "خطا در بررسی وضعیت Google Colab CLI",
+      });
+    }
+  });
+
+  app.post("/api/colab/cli/config", async (req, res) => {
+    try {
+      const { autopilotEnabled, preferredGpu, modelPreset, sessionName, colabAccountEmail } = (req.body || {}) as {
+        autopilotEnabled?: boolean;
+        preferredGpu?: string;
+        modelPreset?: string;
+        sessionName?: string;
+        colabAccountEmail?: string | null;
+      };
+      updateColabCliConfig({
+        autopilotEnabled,
+        preferredGpu,
+        modelPreset,
+        sessionName,
+        colabAccountEmail,
+      });
+      const status = await getColabCliRuntimeStatus();
+      res.json({ cliStatus: status });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "خطا در ذخیره تنظیمات Colab CLI",
+      });
+    }
+  });
+
+  app.post("/api/colab/cli/drive-notebook", async (req, res) => {
+    try {
+      const authHeader = String(req.headers.authorization || "");
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      if (!token) {
+        return res.status(401).json({
+          error: "برای ساخت خودکار نوتبوک در Google Colab، ابتدا با حساب گوگل خود وارد شوید.",
+        });
+      }
+      const { projectId, projectTitle, modelPreset, profileEmail, overwriteExistingFileId } = (req.body || {}) as {
+        projectId?: string;
+        projectTitle?: string;
+        modelPreset?: CloudGpuModelPreset;
+        profileEmail?: string;
+        overwriteExistingFileId?: string;
+      };
+      const notebook = await syncColabNotebookToGoogleDrive({
+        accessToken: token,
+        projectId,
+        projectTitle,
+        modelPreset,
+        profileEmail,
+        overwriteExistingFileId,
+      });
+      const cliStatus = await getColabCliRuntimeStatus();
+      res.json({ notebook, cliStatus });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "خطا در ساخت خودکار نوتبوک در Google Drive",
+      });
+    }
+  });
+
+  app.post("/api/colab/cli/provision", async (req, res) => {
+    try {
+      const authHeader = String(req.headers.authorization || "");
+      const driveToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+      const { projectId, projectTitle, profileEmail, forceNewSession } = (req.body || {}) as {
+        projectId?: string;
+        projectTitle?: string;
+        profileEmail?: string;
+        forceNewSession?: boolean;
+      };
+      const result = await ensureColabGpuRuntimeReady({
+        reason: "manual_provision",
+        projectId,
+        projectTitle,
+        googleDriveAccessToken: driveToken,
+        profileEmail,
+        forceNewSession: Boolean(forceNewSession),
+      });
+      const cliStatus = await getColabCliRuntimeStatus();
+      const toolchain = getMcpToolchainState({
+        connected: Boolean(cliStatus.bridge.connected && cliStatus.bridge.lastHealth?.reachable),
+        blenderAvailable: Boolean(cliStatus.bridge.lastHealth?.engines?.blender),
+        comfyuiAvailable: Boolean(cliStatus.bridge.lastHealth?.engines?.comfyui),
+        gpuName: cliStatus.bridge.lastHealth?.gpuModel,
+      });
+      res.json({ result, cliStatus, toolchain });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : "خطا در راه‌اندازی خودکار Google Colab CLI",
+      });
+    }
+  });
+
+  app.post("/api/colab/cli/stop", async (req, res) => {
+    try {
+      const { sessionName } = (req.body || {}) as { sessionName?: string };
+      const stopped = await stopColabCliSession(sessionName);
+      const cliStatus = await getColabCliRuntimeStatus();
+      res.json({ ...stopped, cliStatus });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : "خطا در توقف نشست Colab CLI",
+      });
+    }
   });
 
   // Complete Project Deliverables Bundle (.ZIP: Storyboard + Shot MP4s + Voiceover + Master MP4 + DaVinci + Notebooks)

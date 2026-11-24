@@ -28,8 +28,60 @@ import type { PipelineStage, ProjectRecord } from "../types/studio";
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+
+export const GOOGLE_DRIVE_SCOPES = [
+  "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/drive.activity",
+  "https://www.googleapis.com/auth/drive.activity.readonly",
+  "https://www.googleapis.com/auth/drive.appdata",
+  "https://www.googleapis.com/auth/drive.apps.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/drive.install",
+  "https://www.googleapis.com/auth/drive.meet.readonly",
+  "https://www.googleapis.com/auth/drive.metadata",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/drive.photos.readonly",
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.scripts",
+] as const;
+
 export const googleProvider = new GoogleAuthProvider();
+for (const scope of GOOGLE_DRIVE_SCOPES) {
+  googleProvider.addScope(scope);
+}
 googleProvider.setCustomParameters({ prompt: "select_account" });
+
+// Strict in-memory cache for Google Workspace OAuth access token (never stored in localStorage/sessionStorage)
+let cachedGoogleAccessToken: string | null = null;
+let isGoogleSigningIn = false;
+const tokenListeners = new Set<(token: string | null) => void>();
+
+function setCachedGoogleAccessToken(next: string | null) {
+  cachedGoogleAccessToken = next;
+  for (const listener of tokenListeners) {
+    try {
+      listener(next);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+export function getGoogleDriveAccessToken(): string | null {
+  return cachedGoogleAccessToken;
+}
+
+export function hasGoogleDriveAccess(): boolean {
+  return Boolean(cachedGoogleAccessToken);
+}
+
+export function subscribeGoogleDriveToken(listener: (token: string | null) => void): () => void {
+  tokenListeners.add(listener);
+  listener(cachedGoogleAccessToken);
+  return () => {
+    tokenListeners.delete(listener);
+  };
+}
 
 export enum OperationType {
   CREATE = "create",
@@ -114,31 +166,54 @@ function mapStageForFirestoreRules(
       return "input";
     case "research_script":
       return "research_script";
-    case "narration":
     case "voiceover":
       return "voiceover";
-    case "director":
+    case "storyboard":
       return "director";
-    case "shot_videos":
-    case "davinci":
-    case "visuals":
+    case "video_shots":
+    case "assembly":
       return "visuals";
     case "completed":
       return "completed";
+    default:
+      return "input";
   }
 }
 
 export function subscribeAuthState(callback: (user: User | null) => void): Unsubscribe {
-  return onAuthStateChanged(auth, callback);
+  return onAuthStateChanged(auth, (user) => {
+    if (!user && !isGoogleSigningIn) {
+      setCachedGoogleAccessToken(null);
+    }
+    callback(user);
+  });
 }
 
 export async function signInWithGoogle(): Promise<User> {
-  const cred = await signInWithPopup(auth, googleProvider);
-  await ensureUserProfileDocs(cred.user);
-  return cred.user;
+  isGoogleSigningIn = true;
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    const oauthCred = GoogleAuthProvider.credentialFromResult(cred);
+    if (oauthCred?.accessToken) {
+      setCachedGoogleAccessToken(oauthCred.accessToken);
+    }
+    await ensureUserProfileDocs(cred.user);
+    return cred.user;
+  } finally {
+    isGoogleSigningIn = false;
+  }
+}
+
+export async function signInWithGoogleForColabDrive(): Promise<{
+  user: User;
+  accessToken: string | null;
+}> {
+  const user = await signInWithGoogle();
+  return { user, accessToken: cachedGoogleAccessToken };
 }
 
 export async function signOutUser(): Promise<void> {
+  setCachedGoogleAccessToken(null);
   await signOut(auth);
 }
 
@@ -213,10 +288,7 @@ export async function syncProjectToFirestore(uid: string, project: ProjectRecord
       scriptHook: clampStr(project.researchScript?.hook, 2000),
       scriptBody: clampStr(project.researchScript?.body, 15000),
       scriptCta: clampStr(project.researchScript?.cta, 2000),
-      narrationText: clampStr(
-        project.narration?.vocalizedNarrationText || project.voiceover?.narrationText,
-        15000
-      ),
+      narrationText: clampStr(project.voiceover?.narrationText, 15000),
       shotsCount: Math.min(30, Math.max(0, project.director?.shots.length ?? 0)),
       updatedAt: serverTimestamp(),
     };

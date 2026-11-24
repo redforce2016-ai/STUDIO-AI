@@ -16,6 +16,9 @@ export type CinemaSceneArchetype =
   | "manifold_flanged_pipes"
   | "pipe_cross_section_inspection"
   | "hollow_billet_tunnel_pov"
+  | "dark_studio_steel_pipe"
+  | "microscopic_crystal_lattice"
+  | "reel_cta_showcase"
   | "generic_cinematic";
 
 export interface ProceduralSceneConfig {
@@ -26,7 +29,7 @@ export interface ProceduralSceneConfig {
   height: number;
   fps: number;
   durationSec: number;
-  paletteMode: "teal_amber" | "steam_steel" | "refinery_night" | "forge_red";
+  paletteMode: "teal_amber" | "steam_steel" | "refinery_night" | "forge_red" | "studio_blue";
 }
 
 export function classifyCinemaSceneArchetype(
@@ -35,6 +38,34 @@ export function classifyCinemaSceneArchetype(
 ): CinemaSceneArchetype {
   const p = (promptText || "").toLowerCase();
 
+  if (
+    /riveted\s+iron\s+pipe|weld(?:ed)?\s*(?:iron\s*)?(?:pipe\s*)?seam|hairline\s+crack|longitudinal\s+weld|boiler\s+room|220\s*bar.*(?:crack|burst|rupture|seam)|درز\s*آن\s*شکافته|لوله\s*ترک‌خورده|ترک\s*داغ|پارگی|پرچ‌کاری|انفجار\s*فشار|گیج\s*فشار|لوله\s*درزدار|می‌?ترکد|شکافتن\s*درز/i.test(
+      p
+    )
+  ) {
+    return "welded_seam_rupture";
+  }
+  if (
+    /crystal|lattice|atomic|microscop|molecular|grain\s*boundar|bcc\s*iron|کریستال|اتم‌های|اتمی|مولکول|میکروسکوپ|ناحیه\s*حرارت|پیوند(?:های)?\s*مولکول/i.test(
+      p
+    )
+  ) {
+    return "microscopic_crystal_lattice";
+  }
+  if (
+    /instagram\s*(?:follow|cta|ui)|follow\s*button|verified\s*check|دکمه.*فالو|فالو\s*کن|آیکون\s*تایید|رابط\s*کاربری\s*اینستاگرام/i.test(
+      p
+    )
+  ) {
+    return "reel_cta_showcase";
+  }
+  if (
+    /two-tone|pressure\s*distribution|stress\s*distribution|uniform\s*stress|360[\s-]*deg|vector\s*graphic|blue\s*rim|dark\s*metallic\s*studio|uniform\s*wall|نور\s*آبی|نورهای?\s*سفید\s*و\s*آبی|توزیع\s*(?:یکنواخت|فشار|تنش)|آنالیز\s*سه\s*بعدی|۳۶۰\s*درجه|برداری|استودیو.*متالیک|ضخامت\s*دیواره\s*یکنواخت|مانیسمان\s*قطور/i.test(
+      p
+    )
+  ) {
+    return "dark_studio_steel_pipe";
+  }
   if (
     /hollow\s+(?:glowing\s+)?center|inside\s+(?:a\s+|the\s+)?(?:hollow|glowing|molten)\s+pipe|molten\s+tunnel|piercing\s+mandrel|\bpov\b|حفره\s*مرکزی|سمبه\s*سوراخ|درون\s*تونل/i.test(
       p
@@ -57,14 +88,7 @@ export function classifyCinemaSceneArchetype(
     return "seamless_pipe_gliding";
   }
   if (
-    /riveted\s+iron\s+pipe|weld(?:ed)?\s*(?:iron\s*)?(?:pipe\s*)?seam|hairline\s+crack|longitudinal\s+weld|boiler\s+room|درز\s*آن\s*شکافته|لوله\s*ترک‌خورده|خط\s*جوش|ترک\s*داغ|پارگی|پرچ‌کاری|انفجار\s*فشار/i.test(
-      p
-    )
-  ) {
-    return "welded_seam_rupture";
-  }
-  if (
-    /rotary\s+piercing|angled\s+conical|conical\s+steel\s+roller|mannesmann.*roller|غلتک|قالب\s*مخروطی|فرم‌دهی\s*لوله|نورد\s*سوراخ|نورد\s*تاریخی/i.test(
+    /rotary\s+piercing|angled\s+conical|conical\s+steel\s+roller|mannesmann.*roller|غلتک|قالب\s*مخروطی|فرم‌دهی\s*لوله|نورد\s*سوراخ|نورد\s*تاریخی|سمبه/i.test(
       p
     )
   ) {
@@ -91,13 +115,13 @@ export function classifyCinemaSceneArchetype(
   }
   if (/pipe|steel|فولاد|لوله|صنعت|کارخانه/i.test(p)) {
     const cycle: CinemaSceneArchetype[] = [
-      "furnace_billet_extraction",
+      "dark_studio_steel_pipe",
       "welded_seam_rupture",
       "rotary_piercing_mill",
       "seamless_pipe_gliding",
+      "pipe_cross_section_inspection",
       "modern_refinery_pipelines",
       "manifold_flanged_pipes",
-      "pipe_cross_section_inspection",
       "hollow_billet_tunnel_pov",
     ];
     return cycle[(Math.max(1, shotNumber) - 1) % cycle.length];
@@ -253,9 +277,12 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const W = ${cfg.width};
 const H = ${cfg.height};
+const isPortrait = H > W;
+const pZ = isPortrait ? 1.52 : 1.0;
 const SS = (W < 480 || H < 480) ? 2 : 1;
 const RW = W * SS;
 const RH = H * SS;
@@ -473,16 +500,22 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setSize(RW, RH, false);
 renderer.setPixelRatio(1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.95;
+renderer.toneMappingExposure = 1.04;
 renderer.shadowMap.enabled = false;
 
 const scene = new THREE.Scene();
-const fogColor = CFG.paletteMode === 'refinery_night' ? 0x05131c : 0x051218;
-scene.background = new THREE.Color(fogColor);
-scene.fog = new THREE.FogExp2(fogColor, 0.075);
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.42;
+pmremGenerator.dispose();
 
-const camera = new THREE.PerspectiveCamera(40, W / H, 0.1, 140);
+const fogColor = CFG.paletteMode === 'studio_blue' ? 0x04070e : CFG.paletteMode === 'refinery_night' ? 0x05131c : 0x051218;
+scene.background = new THREE.Color(fogColor);
+scene.fog = new THREE.FogExp2(fogColor, 0.068);
+
+const camera = new THREE.PerspectiveCamera(isPortrait ? 48 : 40, W / H, 0.1, 140);
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
@@ -955,6 +988,42 @@ if (arch === 'furnace_billet_extraction' || arch === 'seamless_pipe_gliding') {
   const crackMesh = new THREE.Mesh(crackGeo, moltenMat);
   pipeGroup.add(crackMesh);
 
+  // Floating holographic 220 BAR Red Pressure Danger Gauge HUD centered above the rupturing weld seam
+  const gaugeCvs = document.createElement('canvas');
+  gaugeCvs.width = 512; gaugeCvs.height = 512;
+  const gctx = gaugeCvs.getContext('2d');
+  gctx.clearRect(0, 0, 512, 512);
+  gctx.fillStyle = 'rgba(8, 12, 22, 0.86)';
+  gctx.beginPath(); gctx.arc(256, 256, 222, 0, Math.PI * 2); gctx.fill();
+  gctx.lineWidth = 10;
+  gctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+  gctx.beginPath(); gctx.arc(256, 256, 222, 0, Math.PI * 2); gctx.stroke();
+  gctx.lineWidth = 16;
+  gctx.strokeStyle = 'rgba(255, 65, 36, 0.28)';
+  gctx.beginPath(); gctx.arc(256, 256, 198, Math.PI * 0.75, Math.PI * 2.25); gctx.stroke();
+  gctx.lineWidth = 20;
+  gctx.strokeStyle = '#FF3B1F';
+  gctx.beginPath(); gctx.arc(256, 256, 198, Math.PI * 0.75, Math.PI * 2.18); gctx.stroke();
+  gctx.fillStyle = '#FFFFFF';
+  gctx.font = '900 116px sans-serif';
+  gctx.textAlign = 'center';
+  gctx.fillText('220', 256, 272);
+  gctx.fillStyle = '#FF6B4A';
+  gctx.font = '800 44px sans-serif';
+  gctx.fillText('BAR MAX!', 256, 338);
+  gctx.fillStyle = '#94A3B8';
+  gctx.font = '700 28px sans-serif';
+  gctx.fillText('WELD SEAM RUPTURE', 256, 152);
+  const gaugeTex = new THREE.CanvasTexture(gaugeCvs);
+  gaugeTex.colorSpace = THREE.SRGBColorSpace;
+  const gaugePanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.65, 1.65),
+    new THREE.MeshBasicMaterial({ map: gaugeTex, transparent: true, opacity: 0.96 })
+  );
+  gaugePanel.position.set(isPortrait ? 0.0 : 1.38, isPortrait ? 3.55 : 3.05, 0.45);
+  gaugePanel.rotation.y = isPortrait ? 0.0 : -0.22;
+  scene.add(gaugePanel);
+
   const emitY = 1.48 + Math.sin(seamTheta) * 0.88;
   const emitZ = Math.cos(seamTheta) * 0.88;
   sparkEmit.set(0, emitY, emitZ);
@@ -964,13 +1033,14 @@ if (arch === 'furnace_billet_extraction' || arch === 'seamless_pipe_gliding') {
 
   updaters.push((t, prog) => {
     moltenMat.uniforms.uTime.value = t * 1.6;
-    const shake = 0.018 * Math.sin(t * 58);
+    const shake = 0.022 * Math.sin(t * 58);
     pipeGroup.position.y = 1.48 + shake;
-    crackMesh.scale.x = 0.55 + prog * 0.62;
+    crackMesh.scale.x = 0.72 + prog * 0.42;
+    gaugePanel.position.y = (isPortrait ? 3.55 : 3.05) + Math.sin(t * 3.0) * 0.04;
     moltenLight.position.set(0, emitY + 0.25, emitZ + 0.55);
-    moltenLight.intensity = 4.4 + Math.sin(t * 22) * 0.9;
-    camera.position.set(-1.35 + prog * 1.45, 2.55 - prog * 0.18, 5.75 - prog * 0.65);
-    camera.lookAt(0, 1.48, 0.15);
+    moltenLight.intensity = 5.2 + Math.sin(t * 22) * 1.1;
+    camera.position.set((-0.75 + prog * 1.1) * (isPortrait ? 0.7 : 1.0), isPortrait ? 2.85 : 2.55 - prog * 0.18, (6.2 - prog * 0.55) * (isPortrait ? 1.18 : 1.0));
+    camera.lookAt(0, isPortrait ? 2.15 : 1.72, 0.1);
   });
 } else if (arch === 'rotary_piercing_mill') {
   buildFoundryBackdrop();
@@ -1303,6 +1373,359 @@ if (arch === 'furnace_billet_extraction' || arch === 'seamless_pipe_gliding') {
     camera.position.set(Math.sin(t * 2.1) * 0.08, Math.cos(t * 1.7) * 0.06, 3.8 - prog * 5.2);
     camera.lookAt(0.04, -0.02, -7.2);
   });
+} else if (arch === 'dark_studio_steel_pipe') {
+  // Modern Dark Cinematic Metallic Studio: White Overhead Key + Sharp Blue Rim Light + Uniform Seamless Pipe + Pressure Vectors
+  scene.background = new THREE.Color(0x04070e);
+  scene.fog = new THREE.FogExp2(0x04070e, 0.038);
+  scene.environmentIntensity = 0.65;
+  moltenLight.intensity = 0.0;
+  secondaryAmber.intensity = 0.0;
+  hemiLight.color.setHex(0xd8eeff);
+  hemiLight.groundColor.setHex(0x060b16);
+  hemiLight.intensity = 0.78;
+
+  const studioFloor = new THREE.Mesh(
+    new THREE.PlaneGeometry(54, 54),
+    new THREE.MeshStandardMaterial({
+      map: floorTex,
+      color: 0x080e1a,
+      metalness: 0.88,
+      roughness: 0.22,
+    })
+  );
+  studioFloor.rotation.x = -Math.PI / 2;
+  scene.add(studioFloor);
+
+  // Subtle industrial studio grid lines on dark floor
+  const floorGrid = new THREE.GridHelper(28, 28, 0x1e3a5f, 0x0c192c);
+  floorGrid.position.y = 0.02;
+  scene.add(floorGrid);
+
+  // Two-Tone Studio Lights: Crisp White Key on crown + Deep Blue Rim on circular bevel
+  const whiteKey = new THREE.SpotLight(0xffffff, 26.0, 32, Math.PI * 0.36, 0.55, 1.0);
+  whiteKey.position.set(1.8, 7.2, 4.4);
+  scene.add(whiteKey);
+
+  const deepBlueRim = new THREE.SpotLight(0x0ea5e9, 32.0, 28, Math.PI * 0.38, 0.45, 1.0);
+  deepBlueRim.position.set(-4.2, 3.2, -3.2);
+  scene.add(deepBlueRim);
+
+  const cyanCrossRim = new THREE.PointLight(0x38bdf8, 9.5, 16, 1.2);
+  cyanCrossRim.position.set(2.8, 1.4, 2.5);
+  scene.add(cyanCrossRim);
+
+  // Precision thick-walled seamless Mannesmann steel pipe Lathe (beveled walls, zero seam, cleanly framed in 9:16)
+  const pts = [
+    new THREE.Vector2(0.54, -1.75),
+    new THREE.Vector2(0.54, 1.66),
+    new THREE.Vector2(0.61, 1.75),
+    new THREE.Vector2(0.92, 1.75),
+    new THREE.Vector2(0.99, 1.66),
+    new THREE.Vector2(0.99, -1.75),
+    new THREE.Vector2(0.54, -1.75),
+  ];
+  const pipeGeo = new THREE.LatheGeometry(pts, 84);
+  const brushedPipeMat = new THREE.MeshStandardMaterial({
+    map: steelTex,
+    bumpMap: steelTex,
+    bumpScale: 0.014,
+    color: 0xc2d5e6,
+    metalness: 0.94,
+    roughness: 0.20,
+  });
+  const studioGroup = new THREE.Group();
+  studioGroup.position.set(0, 1.75, 0);
+  scene.add(studioGroup);
+
+  // Studio steel V-cradle supports anchoring pipe above reflective floor
+  for (const cz of [-0.95, 0.95]) {
+    const cradle = new THREE.Mesh(
+      new THREE.BoxGeometry(1.4, 0.52, 0.24),
+      new THREE.MeshStandardMaterial({ color: 0x162234, metalness: 0.85, roughness: 0.35 })
+    );
+    cradle.position.set(0, 0.26, cz);
+    scene.add(cradle);
+  }
+
+  const pipeMesh = new THREE.Mesh(pipeGeo, brushedPipeMat);
+  pipeMesh.rotation.x = Math.PI * 0.44;
+  pipeMesh.rotation.z = -Math.PI * 0.14;
+  studioGroup.add(pipeMesh);
+
+  // Sleek glowing cyan-emerald uniform hoop-stress pressure rings & inward force arrows
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.88 });
+  const arrowMat = new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.92 });
+  const pressureRings = [];
+  for (let i = -2; i <= 2; i++) {
+    const rMesh = new THREE.Mesh(new THREE.TorusGeometry(1.14, 0.018, 12, 72), ringMat);
+    rMesh.position.y = i * 0.62;
+    rMesh.rotation.x = Math.PI / 2;
+    pipeMesh.add(rMesh);
+    pressureRings.push(rMesh);
+
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2 + i * 0.3;
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.18, 12), arrowMat);
+      cone.position.set(Math.cos(a) * 1.32, i * 0.62, Math.sin(a) * 1.32);
+      cone.lookAt(Math.cos(a) * 0.4, i * 0.62, Math.sin(a) * 0.4);
+      cone.rotateX(Math.PI / 2);
+      pipeMesh.add(cone);
+    }
+  }
+
+  // Clean HUD Telemetry Callout Card floating above the pipe ("220 BAR · UNIFORM HOOP STRESS")
+  const hudCvs = document.createElement('canvas');
+  hudCvs.width = 768; hudCvs.height = 192;
+  const hctx = hudCvs.getContext('2d');
+  hctx.fillStyle = 'rgba(7, 14, 28, 0.82)';
+  hctx.strokeStyle = 'rgba(34, 211, 238, 0.78)';
+  hctx.lineWidth = 4;
+  hctx.beginPath(); hctx.roundRect(14, 14, 740, 164, 24); hctx.fill(); hctx.stroke();
+  hctx.fillStyle = '#38BDF8';
+  hctx.font = '800 32px sans-serif';
+  hctx.textAlign = 'center';
+  hctx.fillText('SEAMLESS MANNESMANN · ZERO WELD', 384, 74);
+  hctx.fillStyle = '#34D399';
+  hctx.font = '900 48px sans-serif';
+  hctx.fillText('220 BAR · 360° UNIFORM STRESS', 384, 140);
+  const hudTex = new THREE.CanvasTexture(hudCvs);
+  hudTex.colorSpace = THREE.SRGBColorSpace;
+  const hudPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.65, 0.66),
+    new THREE.MeshBasicMaterial({ map: hudTex, transparent: true })
+  );
+  hudPlane.position.set(0, 3.65, 0.25);
+  scene.add(hudPlane);
+
+  sparkMat.color.setHex(0x7dd3fc);
+  sparkEmit.set(0, 1.6, 0.4);
+  sparkMode = 'dust_motes';
+  smokeMode = 'steam_jet';
+
+  updaters.push((t, prog) => {
+    pipeMesh.rotation.y = prog * 0.48;
+    pressureRings.forEach((rm, idx) => {
+      const s = 1.0 + 0.025 * Math.sin(t * 4.5 + idx);
+      rm.scale.set(s, s, 1.0);
+    });
+    camera.position.set((-0.75 + prog * 1.15) * (isPortrait ? 0.6 : 1.0), 2.55 - prog * 0.12, (6.0 - prog * 0.45) * pZ);
+    camera.lookAt(0, 2.05, 0);
+  });
+} else if (arch === 'microscopic_crystal_lattice') {
+  // Curved Steel Pipe Wall + Circular Microscope Cutaway revealing BCC Iron Crystal Lattice (Blue Intact vs Fractured Red HAZ)
+  scene.background = new THREE.Color(0x03060d);
+  scene.fog = new THREE.FogExp2(0x03060d, 0.045);
+  scene.environmentIntensity = 0.55;
+  moltenLight.color.setHex(0xff5a1a);
+  moltenLight.position.set(1.2, 1.9, 1.2);
+  moltenLight.intensity = 6.2;
+  hemiLight.color.setHex(0x60a5fa);
+  hemiLight.intensity = 0.9;
+
+  // Background industrial welded steel pipe wall giving immediate context to the microscopic zoom
+  const bgPipeGeo = new THREE.CylinderGeometry(1.15, 1.15, 7.2, 64);
+  bgPipeGeo.rotateZ(Math.PI / 2);
+  const bgPipe = new THREE.Mesh(bgPipeGeo, darkSteelMat);
+  bgPipe.position.set(0, 0.55, -2.2);
+  scene.add(bgPipe);
+
+  // Glowing red longitudinal weld seam scar across background steel pipe
+  const seamStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(7.2, 0.11, 0.11),
+    new THREE.MeshBasicMaterial({ color: 0xff4518 })
+  );
+  seamStrip.position.set(0, 1.45, -1.38);
+  scene.add(seamStrip);
+
+  // Optical microscope inspection ring framing the 3D crystal lattice
+  const scopeRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.92, 0.045, 18, 84),
+    new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.82 })
+  );
+  scopeRing.position.set(0, 2.35, 0.25);
+  scene.add(scopeRing);
+
+  const latticeGroup = new THREE.Group();
+  latticeGroup.position.set(0, 2.35, 0.15);
+  scene.add(latticeGroup);
+
+  const atomGeo = new THREE.SphereGeometry(0.115, 18, 18);
+  const blueAtomMat = new THREE.MeshStandardMaterial({
+    color: 0x38bdf8,
+    emissive: 0x0284c7,
+    emissiveIntensity: 0.8,
+    metalness: 0.72,
+    roughness: 0.16,
+  });
+  const hotAtomMat = new THREE.MeshStandardMaterial({
+    color: 0xff6b35,
+    emissive: 0xef4444,
+    emissiveIntensity: 1.5,
+    metalness: 0.45,
+    roughness: 0.25,
+  });
+  const blueBondMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.68 });
+  const hotBondMat = new THREE.MeshBasicMaterial({ color: 0xff5a1f, transparent: true, opacity: 0.88 });
+
+  const atoms = [];
+  const spacing = 0.58;
+  for (let ix = -2; ix <= 2; ix++) {
+    for (let iy = -2; iy <= 2; iy++) {
+      for (let iz = -1; iz <= 1; iz++) {
+        const isFaultZone = ix >= 1;
+        const jx = isFaultZone ? (rng() - 0.5) * 0.22 : 0;
+        const jy = isFaultZone ? (rng() - 0.5) * 0.22 : 0;
+        const jz = isFaultZone ? (rng() - 0.5) * 0.18 : 0;
+        const m = new THREE.Mesh(atomGeo, isFaultZone ? hotAtomMat : blueAtomMat);
+        const bx = ix * spacing + jx;
+        const by = iy * spacing + jy;
+        const bz = iz * spacing + jz;
+        m.position.set(bx, by, bz);
+        latticeGroup.add(m);
+        atoms.push({ mesh: m, bx, by, bz, isFaultZone, phase: rng() * 6.28 });
+
+        if (ix < 2) {
+          const isBroken = isFaultZone && rng() > 0.4;
+          if (!isBroken) {
+            const bond = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.018, 0.018, spacing * 0.9, 8),
+              isFaultZone ? hotBondMat : blueBondMat
+            );
+            bond.rotation.z = Math.PI / 2;
+            bond.position.set(bx + spacing * 0.5, by, bz);
+            latticeGroup.add(bond);
+          }
+        }
+        if (iy < 2) {
+          const bondY = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.016, 0.016, spacing * 0.9, 8),
+            isFaultZone ? hotBondMat : blueBondMat
+          );
+          bondY.position.set(bx, by + spacing * 0.5, bz);
+          latticeGroup.add(bondY);
+        }
+      }
+    }
+  }
+
+  sparkMat.color.setHex(0xf97316);
+  sparkEmit.set(0.75, 2.35, 0.2);
+  sparkMode = 'dust_motes';
+  smokeMode = 'warm_smoke';
+
+  updaters.push((t, prog) => {
+    for (const a of atoms) {
+      const amp = a.isFaultZone ? 0.065 : 0.012;
+      a.mesh.position.x = a.bx + Math.sin(t * 6.5 + a.phase) * amp;
+      a.mesh.position.y = a.by + Math.cos(t * 5.8 + a.phase) * amp;
+    }
+    const ang = -0.24 + prog * 0.48;
+    const dist = 5.4 * pZ;
+    camera.position.set(Math.sin(ang) * dist, 2.15, Math.cos(ang) * dist);
+    camera.lookAt(0, 1.95, -0.2);
+  });
+} else if (arch === 'reel_cta_showcase') {
+  // Modern Dark Gradient Studio Showcase (#06090F -> #101726) + Crisp Glassmorphic Follow CTA Card + 3D Seamless Steel Pipe
+  scene.background = new THREE.Color(0x060a14);
+  scene.fog = new THREE.FogExp2(0x080f1d, 0.036);
+  scene.environmentIntensity = 0.65;
+  moltenLight.intensity = 0;
+  secondaryAmber.intensity = 0;
+  hemiLight.color.setHex(0xdbeafe);
+  hemiLight.intensity = 0.88;
+
+  const ctaFloor = new THREE.Mesh(
+    new THREE.PlaneGeometry(46, 46),
+    new THREE.MeshStandardMaterial({ color: 0x070d18, metalness: 0.88, roughness: 0.22 })
+  );
+  ctaFloor.rotation.x = -Math.PI / 2;
+  scene.add(ctaFloor);
+
+  const ctaKey = new THREE.SpotLight(0xffffff, 22, 26, Math.PI * 0.36, 0.58, 1.0);
+  ctaKey.position.set(1.6, 6.2, 4.4);
+  scene.add(ctaKey);
+  const ctaRim = new THREE.PointLight(0x38bdf8, 12, 16, 1.1);
+  ctaRim.position.set(-2.6, 2.0, -1.8);
+  scene.add(ctaRim);
+
+  // Sleek 3D Mannesmann seamless steel pipe cleanly positioned in lower studio third
+  const pts = [
+    new THREE.Vector2(0.36, -1.1),
+    new THREE.Vector2(0.36, 1.04),
+    new THREE.Vector2(0.42, 1.10),
+    new THREE.Vector2(0.66, 1.10),
+    new THREE.Vector2(0.72, 1.04),
+    new THREE.Vector2(0.72, -1.1),
+    new THREE.Vector2(0.36, -1.1),
+  ];
+  const miniPipe = new THREE.Mesh(
+    new THREE.LatheGeometry(pts, 72),
+    new THREE.MeshStandardMaterial({ map: steelTex, color: 0xbad2e6, metalness: 0.94, roughness: 0.18 })
+  );
+  miniPipe.position.set(0.0, 0.92, 0.25);
+  miniPipe.rotation.x = Math.PI * 0.44;
+  miniPipe.rotation.z = -Math.PI * 0.20;
+  scene.add(miniPipe);
+
+  // 3D Glassmorphic Follow + Verified Badge Card cleanly centered with generous side margins (zero cropping!)
+  const ctaCvs = document.createElement('canvas');
+  ctaCvs.width = 1024; ctaCvs.height = 512;
+  const cctx = ctaCvs.getContext('2d');
+  cctx.clearRect(0, 0, 1024, 512);
+  cctx.fillStyle = 'rgba(11, 19, 36, 0.92)';
+  cctx.strokeStyle = 'rgba(56, 189, 248, 0.88)';
+  cctx.lineWidth = 8;
+  cctx.beginPath();
+  cctx.roundRect(32, 32, 960, 448, 56);
+  cctx.fill();
+  cctx.stroke();
+
+  cctx.fillStyle = '#FFFFFF';
+  cctx.font = '800 58px sans-serif';
+  cctx.textAlign = 'center';
+  cctx.fillText('MANNESMANN PRO', 462, 178);
+
+  // Instagram Verified Blue Badge spaced cleanly to the right of text
+  cctx.fillStyle = '#0EA5E9';
+  cctx.beginPath(); cctx.arc(816, 158, 36, 0, Math.PI * 2); cctx.fill();
+  cctx.strokeStyle = '#FFFFFF'; cctx.lineWidth = 8; cctx.lineCap = 'round';
+  cctx.beginPath(); cctx.moveTo(800, 160); cctx.lineTo(812, 174); cctx.lineTo(836, 142); cctx.stroke();
+
+  cctx.fillStyle = '#94A3B8';
+  cctx.font = '600 32px sans-serif';
+  cctx.fillText('INDUSTRIAL STEEL & PIPELINE ENGINEERING', 512, 238);
+
+  // Follow Pill Button
+  const pillGrad = cctx.createLinearGradient(252, 286, 772, 396);
+  pillGrad.addColorStop(0, '#0284C7');
+  pillGrad.addColorStop(1, '#38BDF8');
+  cctx.fillStyle = pillGrad;
+  cctx.beginPath(); cctx.roundRect(262, 288, 500, 108, 54); cctx.fill();
+  cctx.fillStyle = '#040914';
+  cctx.font = '900 50px sans-serif';
+  cctx.fillText('+ FOLLOW', 512, 358);
+
+  const ctaTex = new THREE.CanvasTexture(ctaCvs);
+  ctaTex.colorSpace = THREE.SRGBColorSpace;
+  const ctaCard = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.75, 1.375),
+    new THREE.MeshBasicMaterial({ map: ctaTex, transparent: true })
+  );
+  ctaCard.position.set(0, 2.72, 0.35);
+  scene.add(ctaCard);
+
+  sparkMat.color.setHex(0xfbbf24);
+  sparkEmit.set(0, 1.9, 0.2);
+  sparkMode = 'dust_motes';
+  smokeMode = 'steam_jet';
+
+  updaters.push((t, prog) => {
+    const sc = 1 + Math.sin(t * 4.2) * 0.02;
+    ctaCard.scale.set(sc, sc, 1);
+    miniPipe.rotation.y = prog * 0.45;
+    camera.position.set(0, 1.95, (5.2 - prog * 0.2) * pZ);
+    camera.lookAt(0, 1.9, 0.2);
+  });
 } else {
   // generic_cinematic: atmospheric 3D monolith pillars + Teal/Amber rim lights + floating embers
   buildFoundryBackdrop();
@@ -1374,11 +1797,15 @@ export async function renderProceduralCinemaKeyframePng(params: {
     fps: 24,
     durationSec: 5,
     paletteMode:
-      archetype === "modern_refinery_pipelines"
-        ? "refinery_night"
-        : archetype === "welded_seam_rupture" || archetype === "manifold_flanged_pipes"
-          ? "steam_steel"
-          : "teal_amber",
+      archetype === "dark_studio_steel_pipe" ||
+      archetype === "microscopic_crystal_lattice" ||
+      archetype === "reel_cta_showcase"
+        ? "studio_blue"
+        : archetype === "modern_refinery_pipelines"
+          ? "refinery_night"
+          : archetype === "welded_seam_rupture" || archetype === "manifold_flanged_pipes"
+            ? "steam_steel"
+            : "teal_amber",
   };
 
   const browser = await getSharedCinemaBrowser();
@@ -1430,11 +1857,15 @@ export async function renderProceduralCinemaVideoMp4(params: {
     fps,
     durationSec: dur,
     paletteMode:
-      archetype === "modern_refinery_pipelines"
-        ? "refinery_night"
-        : archetype === "welded_seam_rupture" || archetype === "manifold_flanged_pipes"
-          ? "steam_steel"
-          : "teal_amber",
+      archetype === "dark_studio_steel_pipe" ||
+      archetype === "microscopic_crystal_lattice" ||
+      archetype === "reel_cta_showcase"
+        ? "studio_blue"
+        : archetype === "modern_refinery_pipelines"
+          ? "refinery_night"
+          : archetype === "welded_seam_rupture" || archetype === "manifold_flanged_pipes"
+            ? "steam_steel"
+            : "teal_amber",
   };
 
   fs.mkdirSync(path.dirname(params.outputPath), { recursive: true });

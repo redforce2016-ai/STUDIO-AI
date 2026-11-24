@@ -45,6 +45,7 @@ interface ProviderLedgerEntry {
   cooldownUntil: string | null;
   cooldownReasonFa: string | null;
   lastUsedAt: string | null;
+  modelCooldowns?: Record<string, { cooldownUntil: string; reasonFa: string }>;
 }
 
 interface StoredQuotaLedger {
@@ -114,13 +115,13 @@ export const MODEL_GOVERNANCE_RULES: ModelGovernanceRule[] = [
     taskRole: "research_script",
     titleFa: "مرحله ۱ · پژوهش بازار، استراتژی و نگارش سناریو",
     primaryModel: "gemini-4-hydrogen",
-    fallbackModel: "gemini-3.1-flash-lite",
-    thinkingLevel: "MEDIUM",
+    fallbackModel: "gemini-3.5-flash",
+    thinkingLevel: "LOW",
     allowedByDefault: true,
     allowedWhenFa:
-      "فقط هنگام تحلیل ایده جدید یا بازتولید صریح مرحله ۱ توسط کاربر؛ در صورت خطای سهمیه (429) ابتدا بین ۱۰ کلید جیمیل چرخش می‌کند و سپس روی Flash Lite فالبک می‌زند.",
+      "فقط هنگام تحلیل ایده جدید یا بازتولید صریح مرحله ۱ توسط کاربر؛ در صورت خطای سهمیه (429) بین کلیدها و مدل‌های فعال (gemini-3.5-flash و gemini-3.1-flash-lite) چرخش می‌کند.",
     antiTokenBurnRuleFa:
-      "سطح تفکر قفل‌شده روی MEDIUM (ممنوعیت HIGH/XHIGH در اجرای عادی) + ۱ فراخوانی ساختاریافته JSON با responseSchema.",
+      "سطح تفکر بهینه‌شده روی LOW (جلوگیری از تایم‌اوت و مصرف بی‌رویه) + ۱ فراخوانی ساختاریافته JSON با responseSchema.",
     maxCallsPerProjectStage: 2,
   },
   {
@@ -233,6 +234,14 @@ const DEFAULT_GOOGLE_MODELS: RouterModelEntry[] = [
   {
     id: "gemini-4-hydrogen",
     name: "Gemini 4 Hydrogen (اصلی · سناریو، دکوپاژ، QA)",
+    isFree: true,
+    enabled: true,
+    lastTestedOk: null,
+    lastLatencyMs: null,
+  },
+  {
+    id: "gemini-3.5-flash",
+    name: "Gemini 3.5 Flash (سریع و دقیق · فالبک اصلی)",
     isFree: true,
     enabled: true,
     lastTestedOk: null,
@@ -379,6 +388,9 @@ export function resolveGovernanceThinkingConfig(
   if (m === "gemini-3.1-flash-lite") {
     return { thinkingLevel: ThinkingLevel.MINIMAL };
   }
+  if (m === "gemini-3.5-flash") {
+    return { thinkingLevel: ThinkingLevel.LOW };
+  }
   if (m === "gemini-4-hydrogen") {
     if (rule?.thinkingLevel === "MEDIUM") {
       return { thinkingLevel: ThinkingLevel.MEDIUM };
@@ -455,16 +467,25 @@ function getLedgerEntry(ledger: StoredQuotaLedger, providerId: string): Provider
       cooldownUntil: null,
       cooldownReasonFa: null,
       lastUsedAt: null,
+      modelCooldowns: {},
     };
+  }
+  if (!ledger.entries[providerId].modelCooldowns) {
+    ledger.entries[providerId].modelCooldowns = {};
   }
   return ledger.entries[providerId];
 }
 
-function isProviderInCooldown(entry: ProviderLedgerEntry): boolean {
-  if (!entry.cooldownUntil) return false;
-  const untilMs = Date.parse(entry.cooldownUntil);
-  if (!Number.isFinite(untilMs)) return false;
-  return untilMs > Date.now();
+function isProviderInCooldown(entry: ProviderLedgerEntry, modelId?: string): boolean {
+  if (entry.cooldownUntil) {
+    const untilMs = Date.parse(entry.cooldownUntil);
+    if (Number.isFinite(untilMs) && untilMs > Date.now()) return true;
+  }
+  if (modelId && entry.modelCooldowns?.[modelId]?.cooldownUntil) {
+    const mUntilMs = Date.parse(entry.modelCooldowns[modelId].cooldownUntil);
+    if (Number.isFinite(mUntilMs) && mUntilMs > Date.now()) return true;
+  }
+  return false;
 }
 
 function resolveProviderKey(p: StoredProviderAccount): string {
@@ -526,6 +547,7 @@ function createDefaultStoredConfig(): StoredRouterConfig {
   const defaultTargets: AgentRouteTarget[] = [
     { providerId: "google_acct_1", modelId: "gemini-4-hydrogen" },
     { providerId: "google_default", modelId: "gemini-4-hydrogen" },
+    { providerId: "google_default", modelId: "gemini-3.5-flash" },
     { providerId: "google_default", modelId: "gemini-3.1-flash-lite" },
   ];
 
@@ -806,10 +828,12 @@ export function resetRouterCooldowns(providerId?: string): RouterConfigPublic {
     const entry = getLedgerEntry(ledger, providerId);
     entry.cooldownUntil = null;
     entry.cooldownReasonFa = null;
+    entry.modelCooldowns = {};
   } else {
     for (const entry of Object.values(ledger.entries)) {
       entry.cooldownUntil = null;
       entry.cooldownReasonFa = null;
+      entry.modelCooldowns = {};
     }
   }
   saveQuotaLedger(ledger);
@@ -989,6 +1013,7 @@ export function getActiveGoogleKeyPool(preferredProviderId?: string): ActiveGoog
 
 function recordSuccessfulGoogleCall(params: {
   providerId: string;
+  modelId?: string;
   tokensUsed?: number;
 }): void {
   const ledger = loadQuotaLedger();
@@ -999,6 +1024,9 @@ function recordSuccessfulGoogleCall(params: {
   }
   entry.cooldownUntil = null;
   entry.cooldownReasonFa = null;
+  if (params.modelId && entry.modelCooldowns?.[params.modelId]) {
+    delete entry.modelCooldowns[params.modelId];
+  }
   entry.lastUsedAt = new Date().toISOString();
   saveQuotaLedger(ledger);
 }
@@ -1014,24 +1042,30 @@ function markGoogleAccountCooldownAndFailover(params: {
   const entry = getLedgerEntry(ledger, params.providerId);
   const rawMsg = params.error instanceof Error ? params.error.message : String(params.error);
 
-  let cooldownMs = 120_000; // 2 minutes for per-minute RPM rate limits
-  let reasonFa = "محدودیت نرخ لحظه‌ای (429) — انتقال خودکار به اکانت بعدی";
+  let cooldownMs = 90_000; // 90 seconds for per-minute RPM rate limits
+  let reasonFa = `محدودیت نرخ لحظه‌ای روی ${params.modelId} (429) — جابه‌جایی به مدل/اکانت بعدی`;
 
   if (/per\s*day|daily|rpd/i.test(rawMsg)) {
-    // Cooldown until next UTC midnight
     const tomorrow = new Date();
     tomorrow.setUTCHours(24, 2, 0, 0);
     cooldownMs = Math.max(300_000, tomorrow.getTime() - Date.now());
-    reasonFa = "اتمام سهمیه روزانه مدل در این اکانت — انتقال خودکار به اکانت بعدی";
+    reasonFa = `اتمام سهمیه روزانه مدل ${params.modelId} — جابه‌جایی خودکار به مدل/اکانت بعدی`;
   } else if (isInvalidKeyError(params.error)) {
     cooldownMs = 15 * 60_000;
     reasonFa = "کلید نامعتبر یا فاقد دسترسی (401/403) — کنارگذاری موقت و انتقال به اکانت بعدی";
   }
 
-  entry.cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
-  entry.cooldownReasonFa = reasonFa;
+  const untilIso = new Date(Date.now() + cooldownMs).toISOString();
+  if (isInvalidKeyError(params.error)) {
+    entry.cooldownUntil = untilIso;
+    entry.cooldownReasonFa = reasonFa;
+  } else {
+    // Scope rate/daily 429 cooldowns to the specific modelId so other active models (e.g. gemini-3.5-flash / tts) remain usable!
+    entry.modelCooldowns = entry.modelCooldowns || {};
+    entry.modelCooldowns[params.modelId] = { cooldownUntil: untilIso, reasonFa };
+  }
 
-  if (params.nextProviderId) {
+  if (params.nextProviderId && params.nextProviderId !== params.providerId) {
     ledger.recentFailovers.unshift({
       id: `fo_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       timestamp: new Date().toISOString(),
@@ -1156,6 +1190,7 @@ export async function executeWithGoogleKeyFailover<T>(
         const tokensUsed = extractTotalTokensFromResult(result);
         recordSuccessfulGoogleCall({
           providerId: candidate.provider.id,
+          modelId: options.modelId,
           tokensUsed,
         });
         return {
@@ -1595,6 +1630,7 @@ export async function executeAgentJsonWithRouter<T>(params: {
   const googlePool = getActiveGoogleKeyPool();
   const expandedGoogleFallback: AgentRouteTarget[] = [
     ...googlePool.map((c) => ({ providerId: c.provider.id, modelId: "gemini-4-hydrogen" })),
+    ...googlePool.map((c) => ({ providerId: c.provider.id, modelId: "gemini-3.5-flash" })),
     ...googlePool.map((c) => ({ providerId: c.provider.id, modelId: "gemini-3.1-flash-lite" })),
   ];
   const nonGoogleFallbacks: AgentRouteTarget[] = cfg.providers
@@ -1637,13 +1673,13 @@ export async function executeAgentJsonWithRouter<T>(params: {
     const key = resolveProviderKey(provider);
     if (!key) continue;
 
-    // Only skip a Google account in cooldown when ANOTHER distinct provider exists later in the chain
+    // Skip a (provider, model) target in cooldown only if another target exists later in the chain
     if (provider.kind === "google") {
-      const hasOtherProviderLater = chain.slice(i + 1).some((c) => c.providerId !== provider.id);
-      if (hasOtherProviderLater) {
+      const hasFallbackLater = i < chain.length - 1;
+      if (hasFallbackLater) {
         const ledger = loadQuotaLedger();
         const entry = getLedgerEntry(ledger, provider.id);
-        if (isProviderInCooldown(entry)) {
+        if (isProviderInCooldown(entry, target.modelId)) {
           continue;
         }
       }
@@ -1670,7 +1706,7 @@ export async function executeAgentJsonWithRouter<T>(params: {
           config.responseSchema = params.googleResponseSchema;
         }
 
-        const perCallTimeoutMs = target.modelId === "gemini-4-hydrogen" ? 28000 : 45000;
+        const perCallTimeoutMs = taskRole === "director" ? 75000 : 60000;
         const res = await runWithTimeout(
           ai.models.generateContent({
             model: target.modelId,
@@ -1684,6 +1720,7 @@ export async function executeAgentJsonWithRouter<T>(params: {
         const parsed = JSON.parse(text) as T;
         recordSuccessfulGoogleCall({
           providerId: provider.id,
+          modelId: target.modelId,
           tokensUsed: extractTotalTokensFromResult(res),
         });
         return { data: parsed, usedProvider: `${provider.name} (${provider.envVarName})`, usedModel: target.modelId };

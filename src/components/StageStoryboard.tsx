@@ -583,9 +583,9 @@ export function StageStoryboard({
                             </span>
                           </span>
                           <span className="font-mono text-slate-300 tabular-nums">
-                            نمره کل: {visualAsset.qaSevenLayerAudit.overallScore}/100 · فهم مخاطب:{" "}
-                            {visualAsset.qaSevenLayerAudit.userComprehensionScore}/100 · جذابیت:{" "}
-                            {visualAsset.qaSevenLayerAudit.visualAppealScore}/100
+                            نمره کل: {visualAsset.qaSevenLayerAudit.overallScore}/10 · فهم مخاطب:{" "}
+                            {visualAsset.qaSevenLayerAudit.userComprehensionScore}/10 · جذابیت:{" "}
+                            {visualAsset.qaSevenLayerAudit.visualAppealScore}/10
                           </span>
                         </div>
                         <p className="text-[11px] leading-5 text-slate-400">

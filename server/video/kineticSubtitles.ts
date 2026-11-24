@@ -350,20 +350,20 @@ export function generateKineticAssSubtitles(params: {
       titleFont: "Lalezar",
       primaryColor: "&H0024BFFA",   // Warm Cinema Gold (#FABF24)
       secondaryColor: "&H00FFFFFF", // Crisp White
-      outlineColor: "&H00120F0A",   // Deep Espresso Black outline
-      backColor: "&H80000000",      // Soft 50% drop shadow
+      outlineColor: "&H000D0B08",   // Deep Espresso Black outline
+      backColor: "&H96000000",      // Rich drop shadow
       accentTagHex: "&H0024BFFA&",
-      fontSize: Math.round(params.height * 0.036),
+      fontSize: Math.round(params.height * 0.041),
     },
     industrial_steel_blue: {
       fontName: "Vazirmatn",
       titleFont: "Lalezar",
       primaryColor: "&H00FFF066",   // Crisp Electric Ice Blue (#66F0FF)
       secondaryColor: "&H00FFFFFF", // Pure Metallic White
-      outlineColor: "&H001A1008",   // Deep Navy Charcoal outline
-      backColor: "&H88060A12",      // Soft shadow
+      outlineColor: "&H00120B06",   // Deep Navy Charcoal outline
+      backColor: "&H96040810",      // Rich drop shadow
       accentTagHex: "&H00FFF066&",
-      fontSize: Math.round(params.height * 0.036),
+      fontSize: Math.round(params.height * 0.041),
     },
     viral_karaoke: {
       fontName: "Lalezar",
@@ -371,9 +371,9 @@ export function generateKineticAssSubtitles(params: {
       primaryColor: "&H0010D4FF",   // High-impact Amber-Gold
       secondaryColor: "&H00F8FAFC", // Bright White
       outlineColor: "&H0008080A",
-      backColor: "&H99000000",
+      backColor: "&HAA000000",
       accentTagHex: "&H0010D4FF&",
-      fontSize: Math.round(params.height * 0.041),
+      fontSize: Math.round(params.height * 0.045),
     },
   };
 
@@ -392,23 +392,27 @@ export function generateKineticAssSubtitles(params: {
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: KineticCaption,${p.fontName},${p.fontSize},${p.primaryColor},${p.secondaryColor},${p.outlineColor},${p.backColor},-1,0,0,0,100,100,0,0,1,4.5,2.8,2,${marginLR},${marginLR},${marginV},178`,
-    `Style: ShotHeadline,${p.titleFont},${Math.round(p.fontSize * 0.92)},&H00FFFFFF,${p.primaryColor},${p.outlineColor},&H70080C14,-1,0,0,0,100,100,0,0,1,3.5,2.2,8,${marginLR},${marginLR},${titleMarginV},178`,
+    `Style: KineticCaption,${p.fontName},${p.fontSize},${p.primaryColor},${p.secondaryColor},${p.outlineColor},${p.backColor},-1,0,0,0,100,100,0,0,1,5.5,3.2,2,${marginLR},${marginLR},${marginV},178`,
+    `Style: ShotHeadline,${p.titleFont},${Math.round(p.fontSize * 0.92)},&H00FFFFFF,${p.primaryColor},${p.outlineColor},&H70080C14,-1,0,0,0,100,100,0,0,1,4.0,2.5,8,${marginLR},${marginLR},${titleMarginV},178`,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
   ];
 
   // 1. Audio-synced Kinetic Karaoke Captions (Layer 2)
+  // Uses discrete word-snap (\k) + Unicode RLE/PDF so Persian RTL words highlight cleanly right-to-left without backwards mid-word clipping
   for (const seg of segments) {
     const startStr = formatAssTime(seg.startSec);
     const endStr = formatAssTime(seg.endSec);
-    // Smooth spring pop-in + crisp fade-out + karaoke highlight per word
+    // Smooth spring pop-in + crisp fade-out + word-snap highlight synced to voiceover timing
     const popAnim =
       "{\\an2\\fad(75,70)\\fscx86\\fscy86\\t(0,115,\\fscx104\\fscy104)\\t(115,195,\\fscx100\\fscy100)}";
-    const karaokeBody = seg.words
-      .map((w) => `{\\kf${w.durationCs}}${escapeAssText(w.word)}`)
-      .join(" ");
+    const karaokeBody =
+      "\u202B" +
+      seg.words
+        .map((w) => `{\\k${w.durationCs}}${escapeAssText(w.word)}`)
+        .join(" ") +
+      "\u202C";
     lines.push(
       `Dialogue: 2,${startStr},${endStr},KineticCaption,,0,0,0,,${popAnim}${karaokeBody}`
     );
